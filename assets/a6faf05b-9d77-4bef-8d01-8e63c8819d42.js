@@ -5,12 +5,37 @@
 // "Not Allocated" row on the Access section.
 
 const ALLOC_WINDOW_OPTIONS = [
-  { id: "custom",       label: "Custom date range",     hint: "Pick exact from/to datetimes." },
-  { id: "zeroday",      label: "Zero Day",              hint: "Access valid until end of today only." },
-  { id: "lifelong",     label: "Lifelong",              hint: "No expiry. Flagged for compliance review." },
-  { id: "oneTime",      label: "One-time access",       hint: "Ends when the first session closes." },
-  { id: "workingHours", label: "Working days & hours",  hint: "Mon–Fri, 09:00–18:00 · Asia/Kolkata." },
+  { id: "custom",       label: "Custom date range",    icon: "calendar",  hint: "Exact from/to datetimes.",       tag: "Time-boxed" },
+  { id: "zeroday",      label: "Zero Day",             icon: "zap",       hint: "Valid until end of today only.", tag: "Same-day" },
+  { id: "lifelong",     label: "Lifelong",             icon: "infinity",  hint: "No expiry · flagged.",            tag: "Permanent" },
+  { id: "oneTime",      label: "One-time access",      icon: "target",    hint: "Ends after first session.",       tag: "Single use" },
+  { id: "workingHours", label: "Working days & hours", icon: "clock",     hint: "Recurring weekday window.",       tag: "Recurring" },
 ];
+
+const ALLOC_TIMEZONES = [
+  { id: "Asia/Kolkata",       label: "Asia/Kolkata (IST)" },
+  { id: "UTC",                label: "UTC" },
+  { id: "America/New_York",   label: "America/New_York (ET)" },
+  { id: "America/Los_Angeles",label: "America/Los_Angeles (PT)" },
+  { id: "Europe/London",      label: "Europe/London (GMT)" },
+  { id: "Europe/Berlin",      label: "Europe/Berlin (CET)" },
+  { id: "Australia/Sydney",   label: "Australia/Sydney (AET)" },
+];
+
+const ALLOC_WEEKDAYS = [
+  { i: 1, short: "Mon", long: "Monday" },
+  { i: 2, short: "Tue", long: "Tuesday" },
+  { i: 3, short: "Wed", long: "Wednesday" },
+  { i: 4, short: "Thu", long: "Thursday" },
+  { i: 5, short: "Fri", long: "Friday" },
+  { i: 6, short: "Sat", long: "Saturday" },
+  { i: 0, short: "Sun", long: "Sunday" },
+];
+
+const allocTodayISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+};
 
 const ALLOC_POLICIES_BY_TYPE = {
   database: [
@@ -91,29 +116,188 @@ const AllocSubjectChip = ({ subject, onRemove }) => (
   </span>
 );
 
-const AllocWindowConfig = ({ windowType, custom, setCustom }) => {
+// ─── Access-window configuration ────────────────────────────────────────────
+// Left column: radio list of window types.
+// Right column: settings card scoped to the selected type. Each type has its
+// own tailored inputs (dates + timezone, day-of-week chips + times, session
+// duration cap, compliance ack, etc.) so the config lives in one place instead
+// of scattered ad-hoc widgets under a tile grid.
+
+const AllocLabel = ({ children }) => (
+  <div style={{ font: "600 11px/1 var(--font-sans)", color: "var(--fg-3)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 6 }}>{children}</div>
+);
+
+const AllocTimezoneSelect = ({ value, onChange }) => (
+  <select className="input" value={value} onChange={e => onChange(e.target.value)}
+    style={{ font: "400 12.5px/1.4 var(--font-sans)" }}>
+    {ALLOC_TIMEZONES.map(tz => <option key={tz.id} value={tz.id}>{tz.label}</option>)}
+  </select>
+);
+
+const AllocWindowSettings = ({ windowType, config, setConfig, resource }) => {
+  const patch = (key, val) => setConfig(prev => ({ ...prev, [key]: { ...prev[key], ...val } }));
+
   if (windowType === "custom") {
+    const c = config.custom;
     return (
-      <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-        <Field label="From"><input className="input" type="datetime-local" value={custom.from} onChange={e => setCustom({ ...custom, from: e.target.value })}/></Field>
-        <Field label="To"><input className="input" type="datetime-local" value={custom.to} onChange={e => setCustom({ ...custom, to: e.target.value })}/></Field>
-        <div style={{ gridColumn: "1/-1", font: "400 11.5px/1.4 var(--font-sans)", color: "var(--warning-fg)" }}>
-          Maximum 48 hours per this resource's Production SSH access policy.
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <div><AllocLabel>From</AllocLabel><input className="input" type="datetime-local" value={c.from} onChange={e => patch("custom", { from: e.target.value })}/></div>
+          <div><AllocLabel>To</AllocLabel><input className="input" type="datetime-local" value={c.to} onChange={e => patch("custom", { to: e.target.value })}/></div>
+        </div>
+        <div><AllocLabel>Timezone</AllocLabel><AllocTimezoneSelect value={config.timezone} onChange={v => setConfig(prev => ({ ...prev, timezone: v }))}/></div>
+        <div style={{ padding: 10, background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 6, font: "400 11.5px/1.5 var(--font-sans)", display: "flex", gap: 6, alignItems: "flex-start" }}>
+          <Icon name="alert-circle" size={12} color="var(--warning-fg)" style={{ marginTop: 2 }}/>
+          <span>Maximum 48 hours per this resource's Production SSH access policy. Grants past this cap require a Break-glass policy instead.</span>
         </div>
       </div>
     );
   }
-  const summary = {
-    zeroday:      { text: "Ends today · 23:59",                        tone: "var(--warning-fg)" },
-    lifelong:     { text: "No expiry · flagged for compliance review", tone: "var(--warning-fg)" },
-    oneTime:      { text: "Ends when the first session closes",        tone: "var(--fg-3)" },
-    workingHours: { text: "Mon–Fri · 09:00–18:00 · Asia/Kolkata",       tone: "var(--fg-3)" },
-  }[windowType];
-  return summary ? (
-    <div style={{ marginTop: 10, padding: 10, background: "var(--bg-surface-2)", borderRadius: 6, font: "400 12.5px/1.5 var(--font-sans)", color: summary.tone }}>
-      {summary.text}
-    </div>
-  ) : null;
+
+  if (windowType === "zeroday") {
+    const z = config.zeroday;
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 140px", gap: 10 }}>
+          <div><AllocLabel>Effective date</AllocLabel><input className="input" type="date" value={z.date} onChange={e => patch("zeroday", { date: e.target.value })}/></div>
+          <div><AllocLabel>Cutoff time</AllocLabel><input className="input" type="time" value={z.cutoff} onChange={e => patch("zeroday", { cutoff: e.target.value })}/></div>
+        </div>
+        <div><AllocLabel>Timezone</AllocLabel><AllocTimezoneSelect value={config.timezone} onChange={v => setConfig(prev => ({ ...prev, timezone: v }))}/></div>
+        <div style={{ padding: 10, background: "var(--bg-surface)", borderRadius: 6, font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>
+          Access ends at <strong style={{ color: "var(--fg-1)" }}>{z.date || "today"} · {z.cutoff}</strong> ({config.timezone}). No renewals — a new grant must be issued after cutoff.
+        </div>
+      </div>
+    );
+  }
+
+  if (windowType === "lifelong") {
+    const l = config.lifelong;
+    const critical = resource?.criticality === "critical";
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ padding: 12, background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 6, font: "500 12.5px/1.5 var(--font-sans)", display: "flex", gap: 8, alignItems: "flex-start" }}>
+          <Icon name="alert-triangle" size={13} color="var(--warning-fg)" style={{ marginTop: 2 }}/>
+          <span><strong>No expiry set.</strong> This grant persists until explicitly revoked. It will be surfaced on every compliance review.</span>
+        </div>
+        <div>
+          <AllocLabel>Periodic re-attestation</AllocLabel>
+          <Segmented value={l.reattest} onChange={v => patch("lifelong", { reattest: v })} options={[
+            { value: "30",    label: "Every 30 days" },
+            { value: "60",    label: "60 days" },
+            { value: "90",    label: "90 days" },
+            { value: "never", label: "Never" },
+          ]}/>
+          <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 6 }}>
+            {l.reattest === "never"
+              ? "No automated review reminders — reviews rely on ad-hoc audits."
+              : `PAM will remind the resource owner to re-attest this grant every ${l.reattest} days.`}
+          </div>
+        </div>
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: 10, border: `1px solid ${l.ack ? "var(--brand)" : "var(--border)"}`, background: l.ack ? "var(--brand-soft)" : "var(--bg-app)", borderRadius: 6, cursor: "pointer" }}>
+          <input type="checkbox" checked={l.ack} onChange={e => patch("lifelong", { ack: e.target.checked })}
+            style={{ marginTop: 2, accentColor: "var(--brand)", cursor: "pointer" }}/>
+          <span style={{ font: "500 12.5px/1.4 var(--font-sans)", color: l.ack ? "var(--brand-fg)" : "var(--fg-2)" }}>
+            I acknowledge granting no-expiry access{critical ? " on a Critical resource" : ""}.
+            {critical && <span style={{ display: "block", font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-3)", marginTop: 3 }}>Required for Critical resources.</span>}
+          </span>
+        </label>
+      </div>
+    );
+  }
+
+  if (windowType === "oneTime") {
+    const o = config.oneTime;
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div>
+          <AllocLabel>Max session duration</AllocLabel>
+          <Segmented value={String(o.maxMinutes)} onChange={v => patch("oneTime", { maxMinutes: +v })} options={[
+            { value: "30",  label: "30 min" },
+            { value: "60",  label: "1 hour" },
+            { value: "120", label: "2 hours" },
+            { value: "240", label: "4 hours" },
+          ]}/>
+          <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 6 }}>Session is force-closed when the cap is reached.</div>
+        </div>
+        <div>
+          <AllocLabel>Must start within</AllocLabel>
+          <Segmented value={o.activationDays} onChange={v => patch("oneTime", { activationDays: v })} options={[
+            { value: "1", label: "1 day" },
+            { value: "3", label: "3 days" },
+            { value: "7", label: "7 days" },
+          ]}/>
+          <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 6 }}>If the recipient doesn't connect within this window, the grant expires unused.</div>
+        </div>
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: 10, border: `1px solid ${o.grace ? "var(--brand)" : "var(--border)"}`, background: o.grace ? "var(--brand-soft)" : "var(--bg-app)", borderRadius: 6, cursor: "pointer" }}>
+          <input type="checkbox" checked={o.grace} onChange={e => patch("oneTime", { grace: e.target.checked })}
+            style={{ marginTop: 2, accentColor: "var(--brand)", cursor: "pointer" }}/>
+          <span style={{ font: "500 12.5px/1.4 var(--font-sans)", color: o.grace ? "var(--brand-fg)" : "var(--fg-2)" }}>
+            Allow one 15-minute reconnect after first close
+            <span style={{ display: "block", font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-3)", marginTop: 3 }}>Useful for network blips or fat-finger disconnects.</span>
+          </span>
+        </label>
+      </div>
+    );
+  }
+
+  if (windowType === "workingHours") {
+    const w = config.workingHours;
+    const toggleDay = (i) => patch("workingHours", { days: w.days.includes(i) ? w.days.filter(d => d !== i) : [...w.days, i].sort((a,b) => a - b) });
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div>
+          <AllocLabel>Days of week</AllocLabel>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {ALLOC_WEEKDAYS.map(d => {
+              const on = w.days.includes(d.i);
+              return (
+                <button key={d.i} type="button" onClick={() => toggleDay(d.i)} title={d.long} style={{
+                  padding: "6px 12px",
+                  border: `1px solid ${on ? "var(--brand)" : "var(--border)"}`,
+                  background: on ? "var(--brand-soft)" : "var(--bg-app)",
+                  color: on ? "var(--brand-fg)" : "var(--fg-2)",
+                  borderRadius: 4, cursor: "pointer",
+                  font: `${on ? 600 : 500} 12px/1 var(--font-sans)`,
+                }}>{d.short}</button>
+              );
+            })}
+          </div>
+          <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 6 }}>
+            {w.days.length === 0 ? "Select at least one day." : `${w.days.length} day${w.days.length === 1 ? "" : "s"} enabled.`}
+          </div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <div><AllocLabel>Start time</AllocLabel><input className="input" type="time" value={w.from} onChange={e => patch("workingHours", { from: e.target.value })}/></div>
+          <div><AllocLabel>End time</AllocLabel><input className="input" type="time" value={w.to} onChange={e => patch("workingHours", { to: e.target.value })}/></div>
+        </div>
+        <div><AllocLabel>Timezone</AllocLabel><AllocTimezoneSelect value={config.timezone} onChange={v => setConfig(prev => ({ ...prev, timezone: v }))}/></div>
+        <div style={{ padding: 10, background: "var(--bg-surface)", borderRadius: 6, font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>
+          Recipients can connect only during <strong style={{ color: "var(--fg-1)" }}>{w.from}–{w.to}</strong> on selected days ({config.timezone}). Outside this window, connect attempts are blocked with a policy message.
+        </div>
+      </div>
+    );
+  }
+
+  return null;
+};
+
+// Human-readable one-line summary of the current window configuration —
+// used on the Review step.
+const describeAllocWindow = (windowType, config) => {
+  if (windowType === "custom") {
+    const c = config.custom;
+    if (!c.from || !c.to) return `Custom range · not set`;
+    return `${c.from.replace("T", " ")} → ${c.to.replace("T", " ")} · ${config.timezone}`;
+  }
+  if (windowType === "zeroday")      return `${config.zeroday.date} · ends ${config.zeroday.cutoff} · ${config.timezone}`;
+  if (windowType === "lifelong")     return `No expiry · ${config.lifelong.reattest === "never" ? "no re-attestation" : `re-attest every ${config.lifelong.reattest} days`}`;
+  if (windowType === "oneTime")      return `${config.oneTime.maxMinutes}-min cap · must start within ${config.oneTime.activationDays} day${config.oneTime.activationDays === "1" ? "" : "s"}${config.oneTime.grace ? " · 15-min reconnect" : ""}`;
+  if (windowType === "workingHours") {
+    const w = config.workingHours;
+    const days = w.days.map(i => ALLOC_WEEKDAYS.find(d => d.i === i)?.short).filter(Boolean).join(", ");
+    return `${days || "no days"} · ${w.from}–${w.to} · ${config.timezone}`;
+  }
+  return "";
 };
 
 const ResourceAllocatePanelV3 = ({ resource, prefill, onClose, onAllocated }) => {
@@ -130,7 +314,14 @@ const ResourceAllocatePanelV3 = ({ resource, prefill, onClose, onAllocated }) =>
   const [kindFilter, setKindFilter] = React.useState(prefill?.kind || "user");
   const [search, setSearch] = React.useState("");
   const [windowType, setWindowType] = React.useState(initialWindow);
-  const [custom, setCustom] = React.useState({ from: "", to: "" });
+  const [windowConfig, setWindowConfig] = React.useState(() => ({
+    timezone:     "Asia/Kolkata",
+    custom:       { from: "", to: "" },
+    zeroday:      { date: allocTodayISO(), cutoff: "23:59" },
+    lifelong:     { ack: false, reattest: "60" },
+    oneTime:      { maxMinutes: 60, activationDays: "3", grace: false },
+    workingHours: { days: [1, 2, 3, 4, 5], from: "09:00", to: "18:00" },
+  }));
   const [policyId, setPolicyId] = React.useState("prod-ssh");
   const [credentialId, setCredentialId] = React.useState("");
   const [note, setNote] = React.useState("");
@@ -166,8 +357,22 @@ const ResourceAllocatePanelV3 = ({ resource, prefill, onClose, onAllocated }) =>
     if (subjects.length === 0) return "Select at least one user, group, or role.";
     if (!windowType) return "Choose an access window.";
     if (windowType === "custom") {
-      if (!custom.from || !custom.to) return "Set both From and To datetimes.";
-      if (new Date(custom.to) <= new Date(custom.from)) return "To must be after From.";
+      const c = windowConfig.custom;
+      if (!c.from || !c.to) return "Set both From and To datetimes.";
+      if (new Date(c.to) <= new Date(c.from)) return "To must be after From.";
+      const hours = (new Date(c.to) - new Date(c.from)) / 36e5;
+      if (hours > 48) return "Custom range exceeds 48-hour policy cap. Use Break-glass instead.";
+    }
+    if (windowType === "zeroday") {
+      if (!windowConfig.zeroday.date || !windowConfig.zeroday.cutoff) return "Set effective date and cutoff time.";
+    }
+    if (windowType === "lifelong") {
+      if (!windowConfig.lifelong.ack) return "Acknowledge no-expiry grant to continue.";
+    }
+    if (windowType === "workingHours") {
+      const w = windowConfig.workingHours;
+      if (!w.days.length) return "Select at least one day of the week.";
+      if (!w.from || !w.to || w.from >= w.to) return "Start time must be before end time.";
     }
     if (!policyId) return "Select a governing policy.";
     if (!credentialId) return "Pick the credential to allocate.";
@@ -184,14 +389,12 @@ const ResourceAllocatePanelV3 = ({ resource, prefill, onClose, onAllocated }) =>
   const submit = () => {
     onAllocated && onAllocated({
       subjectSummary: subjects.map(s => s.name).join(", "),
-      subjects, windowType, custom, policyId, credentialId, note,
+      subjects, windowType, windowConfig, policyId, credentialId, note,
     });
     onClose();
   };
 
-  const windowDescriptor = windowType === "custom"
-    ? (custom.from && custom.to ? `${custom.from.replace("T"," ")} → ${custom.to.replace("T"," ")}` : "Custom range · not set")
-    : windowMeta?.hint;
+  const windowDescriptor = describeAllocWindow(windowType, windowConfig);
 
   return (
     <Panel title={step === "review" ? `Review · Allocate on ${resource.name}` : `Allocate access · ${resource.name}`}
@@ -265,30 +468,44 @@ const ResourceAllocatePanelV3 = ({ resource, prefill, onClose, onAllocated }) =>
               </div>
             )}
 
-            {/* Section 2 · Access window */}
+            {/* Section 2 · Access window — radio list on the left, live config on the right */}
             <div style={{ marginTop: 22 }}><AllocSectionHeader n="2" label="Access window"/></div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-              {ALLOC_WINDOW_OPTIONS.map(o => {
-                const sel = windowType === o.id;
-                return (
-                  <button key={o.id} onClick={() => setWindowType(o.id)} style={{
-                    padding: 12, border: `1px solid ${sel ? "var(--brand)" : "var(--border)"}`,
-                    background: sel ? "var(--brand-soft)" : "var(--bg-app)",
-                    borderRadius: 6, cursor: "pointer", textAlign: "left",
-                    display: "flex", flexDirection: "column", gap: 4,
-                  }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ width: 12, height: 12, borderRadius: "50%", border: `2px solid ${sel ? "var(--brand)" : "var(--border-strong)"}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                        {sel && <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--brand)" }}/>}
+            <div style={{ display: "grid", gridTemplateColumns: "260px minmax(0, 1fr)", gap: 12, alignItems: "stretch" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {ALLOC_WINDOW_OPTIONS.map(o => {
+                  const sel = windowType === o.id;
+                  return (
+                    <button key={o.id} onClick={() => setWindowType(o.id)} style={{
+                      padding: 10, border: `1px solid ${sel ? "var(--brand)" : "var(--border)"}`,
+                      background: sel ? "var(--brand-soft)" : "var(--bg-app)",
+                      borderRadius: 6, cursor: "pointer", textAlign: "left",
+                      display: "flex", alignItems: "flex-start", gap: 10,
+                    }}>
+                      <span style={{ width: 14, height: 14, borderRadius: "50%", border: `2px solid ${sel ? "var(--brand)" : "var(--border-strong)"}`, display: "flex", alignItems: "center", justifyContent: "center", flex: "none", marginTop: 2 }}>
+                        {sel && <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--brand)" }}/>}
                       </span>
-                      <span style={{ font: "500 13px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>{o.label}</span>
-                    </div>
-                    <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", paddingLeft: 20 }}>{o.hint}</div>
-                  </button>
-                );
-              })}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <Icon name={o.icon} size={13} color={sel ? "var(--brand-fg)" : "var(--fg-3)"}/>
+                          <span style={{ font: `${sel ? 600 : 500} 13px/1.2 var(--font-sans)`, color: "var(--fg-1)" }}>{o.label}</span>
+                        </div>
+                        <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 3, paddingLeft: 21 }}>{o.hint}</div>
+                      </div>
+                      <span className="badge" style={{ flex: "none", marginTop: 1 }}>{o.tag}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="card" style={{ padding: 16, background: "var(--bg-surface-2)", border: "1px solid var(--border-subtle)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, paddingBottom: 10, borderBottom: "1px solid var(--border-subtle)" }}>
+                  <Icon name={windowMeta?.icon} size={14} color="var(--brand-fg)"/>
+                  <span style={{ font: "600 13px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>Configure · {windowMeta?.label}</span>
+                  <div style={{ flex: 1 }}/>
+                  <span className="t-tiny" style={{ color: "var(--fg-4)", fontWeight: 400 }}>{windowMeta?.hint}</span>
+                </div>
+                <AllocWindowSettings windowType={windowType} config={windowConfig} setConfig={setWindowConfig} resource={resource}/>
+              </div>
             </div>
-            <AllocWindowConfig windowType={windowType} custom={custom} setCustom={setCustom}/>
 
             {/* Section 3 · Governing policy */}
             <div style={{ marginTop: 22 }}><AllocSectionHeader n="3" label="Governing policy"/></div>

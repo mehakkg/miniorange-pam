@@ -46,6 +46,7 @@ const ResourceDetailV2 = ({ resource, onBack }) => {
     { id: "overview",    label: "Overview",       weight: 1 },
     { id: "credentials", label: "Credentials",    weight: 2 },
     { id: "policy",      label: "Policy",         weight: 2 },
+    { id: "access",      label: "Access",         weight: 2 },
     { id: "sessions",    label: "Sessions",       weight: 2, live: r.sessions || 0 },
     { separator: true },
     { id: "audit",       label: "Audit trail",    weight: 3 },
@@ -88,9 +89,10 @@ const ResourceDetailV2 = ({ resource, onBack }) => {
       </div>
 
       <div className="scroll-area" style={{ flex: 1, overflow: "auto" }}>
-        {tab === "overview" && <ResourceOverviewTab r={r} editing={editing} onRevoke={setConfirmRevoke} onAllocate={setAllocatePrefill}/>}
+        {tab === "overview" && <ResourceOverviewTab r={r} editing={editing}/>}
         {tab === "credentials" && <CredentialsTab r={r}/>}
         {tab === "policy" && <PolicyTab r={r}/>}
+        {tab === "access" && <ResourceAccessTab r={r} onRevoke={setConfirmRevoke} onAllocate={setAllocatePrefill}/>}
         {tab === "sessions" && <SessionsTab r={r}/>}
         {tab === "audit" && <AuditTab r={r}/>}
       </div>
@@ -109,7 +111,7 @@ const ResourceDetailV2 = ({ resource, onBack }) => {
   );
 };
 
-const ResourceOverviewTab = ({ r, editing, onRevoke, onAllocate }) => {
+const ResourceOverviewTab = ({ r, editing }) => {
   const [draft, setDraft] = React.useState({
     host: r.host, port: r.port, owner: "Platform team",
     description: "Primary read/write database for the ledger service. PCI-scoped. Owned by Platform.",
@@ -144,9 +146,6 @@ const ResourceOverviewTab = ({ r, editing, onRevoke, onAllocate }) => {
 
   return (
   <div style={{ padding: 24, display: "grid", gridTemplateColumns: "minmax(0, 1fr) 360px", gap: 16 }}>
-    <div className="card" style={{ gridColumn: "1 / -1" }}>
-      <AccessSection r={r} onRevoke={onRevoke} onAllocate={onAllocate}/>
-    </div>
     <div className="card">
       <div className="card-header"><span className="h-card">Resource details</span></div>
       <div style={{ padding: "8px 20px 20px" }}>
@@ -426,6 +425,16 @@ const AccessSectionLabel = ({ text, count }) => (
 
 const AccessSection = ({ r, onRevoke, onAllocate }) => {
   const [pivot, setPivot] = React.useState("user");
+  // Per-pivot search + filter state so switching pivots doesn't wipe local UI.
+  const [byPivotState, setByPivotState] = React.useState({
+    user:  { query: "", filter: "allocated" },
+    group: { query: "", filter: "allocated" },
+    role:  { query: "", filter: "allocated" },
+  });
+  const pivotState = byPivotState[pivot];
+  const setQuery  = (q) => setByPivotState(s => ({ ...s, [pivot]: { ...s[pivot], query: q } }));
+  const setFilter = (f) => setByPivotState(s => ({ ...s, [pivot]: { ...s[pivot], filter: f } }));
+
   const data = React.useMemo(() => buildAccessData(r), [r]);
   const active = data[pivot];
   const pivotLabel = pivot === "user" ? "By user" : pivot === "group" ? "By group" : "By role";
@@ -435,6 +444,13 @@ const AccessSection = ({ r, onRevoke, onAllocate }) => {
     subject: row ? { id: row.id, name: row.name, secondary: row.secondary, pending: row.pending } : null,
     suggestedWindow: row?.suggestedWindow,
   });
+
+  const showingAllocated = pivotState.filter === "allocated";
+  const rows = showingAllocated ? active.allocated : active.notAllocated;
+  const q = pivotState.query.trim().toLowerCase();
+  const filteredRows = q
+    ? rows.filter(row => (row.name + " " + (row.secondary || "") + " " + (row.signal || "")).toLowerCase().includes(q))
+    : rows;
 
   return (
     <div>
@@ -474,15 +490,54 @@ const AccessSection = ({ r, onRevoke, onAllocate }) => {
         ))}
       </div>
 
-      <div style={{ padding: "6px 20px 20px" }}>
-        {/* Allocated section */}
-        <AccessSectionLabel text={`${pivotLabel} · Allocated`} count={active.allocated.length}/>
+      {/* Toolbar: filter dropdown + search */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 20px 0" }}>
+        <div style={{ position: "relative", minWidth: 220 }}>
+          <select
+            value={pivotState.filter}
+            onChange={e => setFilter(e.target.value)}
+            className="input"
+            style={{ appearance: "none", WebkitAppearance: "none", paddingRight: 30, cursor: "pointer", font: "500 13px/1 var(--font-sans)", color: "var(--fg-1)", background: "var(--bg-surface)" }}
+          >
+            <option value="allocated">Showing · Allocated ({active.allocated.length})</option>
+            <option value="notAllocated">Showing · Not allocated ({active.notAllocated.length})</option>
+          </select>
+          <Icon name="chevron-down" size={12} color="var(--fg-3)" style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}/>
+        </div>
+        <div style={{ position: "relative", flex: 1, maxWidth: 360 }}>
+          <Icon name="search" size={13} color="var(--fg-4)" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}/>
+          <input
+            value={pivotState.query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder={`Search ${pivotLabel.replace("By ", "")}s in this view…`}
+            className="input"
+            style={{ paddingLeft: 30, font: "400 13px/1.4 var(--font-sans)" }}
+          />
+          {pivotState.query && (
+            <button onClick={() => setQuery("")} aria-label="Clear search"
+              style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "transparent", border: "none", cursor: "pointer", padding: 4, color: "var(--fg-4)", display: "flex" }}>
+              <Icon name="x" size={11}/>
+            </button>
+          )}
+        </div>
+        <div style={{ flex: 1 }}/>
+        <span className="t-tiny" style={{ color: "var(--fg-4)", fontWeight: 400 }}>
+          {filteredRows.length} of {rows.length}
+          {q && ` matching "${pivotState.query}"`}
+        </span>
+      </div>
+
+      <div style={{ padding: "12px 20px 20px" }}>
         <div className="card" style={{ borderColor: "var(--border)" }}>
-          {active.allocated.length === 0 ? (
-            <div style={{ padding: 28, textAlign: "center", color: "var(--fg-4)", font: "400 13px/1.5 var(--font-sans)" }}>
-              No {pivotLabel.toLowerCase()} grants on this resource.
+          {filteredRows.length === 0 ? (
+            <div style={{ padding: 34, textAlign: "center", color: "var(--fg-4)", font: "400 13px/1.5 var(--font-sans)" }}>
+              {q
+                ? `No ${showingAllocated ? "allocated" : "not-allocated"} ${pivotLabel.replace("By ", "")}s match "${pivotState.query}".`
+                : (showingAllocated
+                    ? `No ${pivotLabel.toLowerCase()} grants on this resource.`
+                    : `No ${pivotLabel.replace("By ", "")}s pending review.`)}
             </div>
-          ) : (
+          ) : showingAllocated ? (
             <table className="table">
               <thead>
                 <tr>
@@ -495,7 +550,7 @@ const AccessSection = ({ r, onRevoke, onAllocate }) => {
                 </tr>
               </thead>
               <tbody>
-                {active.allocated.map(row => (
+                {filteredRows.map(row => (
                   <tr key={row.id}>
                     <td><SubjectCell kind={pivot} name={row.name} secondary={row.secondary}/></td>
                     <td><AccessWindowCell window={row.window} resource={r}/></td>
@@ -512,16 +567,6 @@ const AccessSection = ({ r, onRevoke, onAllocate }) => {
                 ))}
               </tbody>
             </table>
-          )}
-        </div>
-
-        {/* Not Allocated section */}
-        <AccessSectionLabel text={`${pivotLabel} · Not allocated`} count={active.notAllocated.length}/>
-        <div className="card" style={{ borderColor: "var(--border)" }}>
-          {active.notAllocated.length === 0 ? (
-            <div style={{ padding: 28, textAlign: "center", color: "var(--fg-4)", font: "400 13px/1.5 var(--font-sans)" }}>
-              No pending candidates for review.
-            </div>
           ) : (
             <table className="table">
               <thead>
@@ -534,7 +579,7 @@ const AccessSection = ({ r, onRevoke, onAllocate }) => {
                 </tr>
               </thead>
               <tbody>
-                {active.notAllocated.map(row => {
+                {filteredRows.map(row => {
                   const wMeta = ACCESS_WINDOW_META[row.suggestedWindow] || ACCESS_WINDOW_META.custom;
                   return (
                     <tr key={row.id}>
@@ -564,6 +609,16 @@ const AccessSection = ({ r, onRevoke, onAllocate }) => {
     </div>
   );
 };
+
+// ResourceAccessTab — thin wrapper that positions AccessSection as a full-width
+// card inside the Access tab's scroll area.
+const ResourceAccessTab = ({ r, onRevoke, onAllocate }) => (
+  <div style={{ padding: 24 }}>
+    <div className="card">
+      <AccessSection r={r} onRevoke={onRevoke} onAllocate={onAllocate}/>
+    </div>
+  </div>
+);
 
 const SessionsTab = ({ r }) => {
   const [sub, setSub] = React.useState("live");
