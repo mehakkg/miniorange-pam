@@ -46,7 +46,6 @@ const ResourceDetailV2 = ({ resource, onBack }) => {
     { id: "overview",    label: "Overview",       weight: 1 },
     { id: "credentials", label: "Credentials",    weight: 2 },
     { id: "policy",      label: "Policy",         weight: 2 },
-    { id: "access",      label: "Access",         weight: 2 },
     { id: "sessions",    label: "Sessions",       weight: 2, live: r.sessions || 0 },
     { separator: true },
     { id: "audit",       label: "Audit trail",    weight: 3 },
@@ -89,10 +88,9 @@ const ResourceDetailV2 = ({ resource, onBack }) => {
       </div>
 
       <div className="scroll-area" style={{ flex: 1, overflow: "auto" }}>
-        {tab === "overview" && <OverviewTab r={r} editing={editing}/>}
+        {tab === "overview" && <ResourceOverviewTab r={r} editing={editing} onRevoke={setConfirmRevoke} onAllocate={setAllocatePrefill}/>}
         {tab === "credentials" && <CredentialsTab r={r}/>}
         {tab === "policy" && <PolicyTab r={r}/>}
-        {tab === "access" && <AccessTab r={r} onRevoke={setConfirmRevoke} onAllocate={setAllocatePrefill}/>}
         {tab === "sessions" && <SessionsTab r={r}/>}
         {tab === "audit" && <AuditTab r={r}/>}
       </div>
@@ -111,7 +109,7 @@ const ResourceDetailV2 = ({ resource, onBack }) => {
   );
 };
 
-const OverviewTab = ({ r, editing }) => {
+const ResourceOverviewTab = ({ r, editing, onRevoke, onAllocate }) => {
   const [draft, setDraft] = React.useState({
     host: r.host, port: r.port, owner: "Platform team",
     description: "Primary read/write database for the ledger service. PCI-scoped. Owned by Platform.",
@@ -146,6 +144,9 @@ const OverviewTab = ({ r, editing }) => {
 
   return (
   <div style={{ padding: 24, display: "grid", gridTemplateColumns: "minmax(0, 1fr) 360px", gap: 16 }}>
+    <div className="card" style={{ gridColumn: "1 / -1" }}>
+      <AccessSection r={r} onRevoke={onRevoke} onAllocate={onAllocate}/>
+    </div>
     <div className="card">
       <div className="card-header"><span className="h-card">Resource details</span></div>
       <div style={{ padding: "8px 20px 20px" }}>
@@ -300,56 +301,57 @@ const PolKV = ({ label, value, ok, off }) => (
   </div>
 );
 
-// ─── Access Tab (V3, miniOrange design system) ────────────────────────────────
-// Pivots: user / group / role, each with two structural sections: Allocated
-// and Not Allocated. Access window is a fixed-structure column (type + expiry
-// or "No expiry" flag). Row shape carries the same risk + pending signals
-// through both sections.
+// ─── Access section (native design system) ───────────────────────────────────
+// Renders inside the Overview tab as a full-width card. Three pivots (user /
+// group / role) each show two structural sections: Allocated and Not
+// Allocated. Access window is a fixed-structure column (type + expiry or
+// countdown; visible "No expiry set" flag for lifelong grants on critical
+// resources). Row-level Allocate on a Not-Allocated row prefills the wizard.
 
 const ACCESS_WINDOW_META = {
-  lifelong:     { label: "Lifelong",     dot: "#8A8A8A" },
-  custom:       { label: "Custom range", dot: "#E85D26" },
-  zeroday:      { label: "Zero Day",     dot: "#B45309" },
-  oneTime:      { label: "One-time",     dot: "#1D4ED8" },
-  workingHours: { label: "Working hrs",  dot: "#15803D" },
+  lifelong:     { label: "Lifelong",     dot: "var(--fg-4)" },
+  custom:       { label: "Custom range", dot: "var(--brand)" },
+  zeroday:      { label: "Zero Day",     dot: "var(--warning-fg)" },
+  oneTime:      { label: "One-time",     dot: "var(--info-fg)" },
+  workingHours: { label: "Working hrs",  dot: "var(--success-fg)" },
 };
 
 const buildAccessData = (r) => ({
   user: {
     allocated: [
-      { id: "u-priya",   name: "Priya Iyer",   secondary: "Admin · DBA leads",       window: { type: "lifelong" }, lastActivity: "2h ago",    risk: "high", policy: "Production SSH access", credential: "root-primary" },
-      { id: "u-marcus",  name: "Marcus Chen",  secondary: "Operator · DevOps team",   window: { type: "custom",  expiresAt: "Apr 30 · 18:00", remaining: "in 2h 14m", expiring: true }, lastActivity: "12m ago",  risk: "med",  policy: "Production SSH access", credential: "root-primary" },
-      { id: "u-aria",    name: "Aria Chen",    secondary: "Security Admin · You",     window: { type: "workingHours" }, lastActivity: "42m ago", risk: "low",  policy: "Production SSH access", credential: "root-primary" },
-      { id: "u-dana",    name: "Dana Whitley", secondary: "Contractor · ends May 15", window: { type: "oneTime", used: false }, lastActivity: "Never",     risk: "med",  policy: "Break-glass window",     credential: "ssh-deploy" },
+      { id: "u-priya",  name: "Priya Iyer",   secondary: "Admin · DBA leads",       window: { type: "lifelong" }, lastActivity: "2h ago",  risk: "high", policy: "Production SSH access", credential: "root-primary" },
+      { id: "u-marcus", name: "Marcus Chen",  secondary: "Operator · DevOps team",   window: { type: "custom", expiresAt: "Apr 30 · 18:00", remaining: "in 2h 14m", expiring: true }, lastActivity: "12m ago", risk: "med", policy: "Production SSH access", credential: "root-primary" },
+      { id: "u-aria",   name: "Aria Chen",    secondary: "Security Admin · You",     window: { type: "workingHours" }, lastActivity: "42m ago", risk: "low", policy: "Production SSH access", credential: "root-primary" },
+      { id: "u-dana",   name: "Dana Whitley", secondary: "Contractor · ends May 15", window: { type: "oneTime", used: false }, lastActivity: "Never", risk: "med", policy: "Break-glass window", credential: "ssh-deploy" },
     ],
     notAllocated: [
-      { id: "u-kai",     name: "Kai Watanabe", secondary: "DBA candidate",             suggestedWindow: "workingHours", signal: "Requested TKT-2104",       pending: { ticket: "TKT-2104", requestedAt: "18h ago" }, risk: "med" },
-      { id: "u-diego",   name: "Diego Vasquez", secondary: "Operator · DevOps team",   suggestedWindow: "workingHours", signal: "Group DevOps team peer",  risk: "low" },
-      { id: "u-lea",     name: "Léa Martin",    secondary: "SRE · On-call rotation",   suggestedWindow: "zeroday",      signal: "On-call · eligible via SRE policy", risk: "low" },
-      { id: "u-jamal",   name: "Jamal Green",   secondary: "Auditor",                   suggestedWindow: "oneTime",      signal: "Compliance review window",  risk: "low" },
+      { id: "u-kai",    name: "Kai Watanabe",   secondary: "DBA candidate",         suggestedWindow: "workingHours", signal: "Requested TKT-2104", pending: { ticket: "TKT-2104", requestedAt: "18h ago" }, risk: "med" },
+      { id: "u-diego",  name: "Diego Vasquez",  secondary: "Operator · DevOps team", suggestedWindow: "workingHours", signal: "Group DevOps team peer", risk: "low" },
+      { id: "u-lea",    name: "Léa Martin",     secondary: "SRE · On-call rotation", suggestedWindow: "zeroday",      signal: "On-call · eligible via SRE policy", risk: "low" },
+      { id: "u-jamal",  name: "Jamal Green",    secondary: "Auditor",                suggestedWindow: "oneTime",      signal: "Compliance review window", risk: "low" },
     ],
   },
   group: {
     allocated: [
-      { id: "g-devops",  name: "DevOps team",       secondary: "8 members",  window: { type: "workingHours" }, lastActivity: "12m ago",  risk: "med",  policy: "Production SSH access", credential: "ssh-deploy" },
-      { id: "g-oncall",  name: "On-call rotation",  secondary: "5 members",  window: { type: "lifelong" }, lastActivity: "5h ago",   risk: "high", policy: "Break-glass window",     credential: "ssh-deploy" },
-      { id: "g-dba",     name: "DBA leads",         secondary: "3 members",  window: { type: "lifelong" }, lastActivity: "2h ago",   risk: "high", policy: "Production SSH access", credential: "root-primary" },
+      { id: "g-devops", name: "DevOps team",      secondary: "8 members", window: { type: "workingHours" }, lastActivity: "12m ago", risk: "med",  policy: "Production SSH access", credential: "ssh-deploy" },
+      { id: "g-oncall", name: "On-call rotation", secondary: "5 members", window: { type: "lifelong" },     lastActivity: "5h ago",  risk: "high", policy: "Break-glass window",     credential: "ssh-deploy" },
+      { id: "g-dba",    name: "DBA leads",        secondary: "3 members", window: { type: "lifelong" },     lastActivity: "2h ago",  risk: "high", policy: "Production SSH access", credential: "root-primary" },
     ],
     notAllocated: [
-      { id: "g-platform",  name: "Platform team",   secondary: "6 members",  suggestedWindow: "workingHours", signal: "Owns adjacent resources",  risk: "med" },
-      { id: "g-dataeng",   name: "Data-Platform",   secondary: "4 members",  suggestedWindow: "custom",       signal: "Consumes prod-db-primary reads", risk: "med" },
-      { id: "g-sreoncall", name: "SRE-oncall",       secondary: "7 members", suggestedWindow: "zeroday",      signal: "Peers with On-call rotation",  risk: "low" },
+      { id: "g-platform",  name: "Platform team", secondary: "6 members", suggestedWindow: "workingHours", signal: "Owns adjacent resources",       risk: "med" },
+      { id: "g-dataeng",   name: "Data-Platform", secondary: "4 members", suggestedWindow: "custom",       signal: "Consumes prod-db-primary reads", risk: "med" },
+      { id: "g-sreoncall", name: "SRE-oncall",    secondary: "7 members", suggestedWindow: "zeroday",      signal: "Peers with On-call rotation",   risk: "low" },
     ],
   },
   role: {
     allocated: [
-      { id: "r-admin",    name: "Admin",     secondary: "12 members",  window: { type: "lifelong" }, lastActivity: "2h ago",   risk: "high", policy: "Production SSH access", credential: "root-primary" },
-      { id: "r-operator", name: "Operator",  secondary: "24 members",  window: { type: "workingHours" }, lastActivity: "12m ago",  risk: "med",  policy: "Production SSH access", credential: "ssh-deploy" },
+      { id: "r-admin",    name: "Admin",    secondary: "12 members", window: { type: "lifelong" },     lastActivity: "2h ago",  risk: "high", policy: "Production SSH access", credential: "root-primary" },
+      { id: "r-operator", name: "Operator", secondary: "24 members", window: { type: "workingHours" }, lastActivity: "12m ago", risk: "med",  policy: "Production SSH access", credential: "ssh-deploy" },
     ],
     notAllocated: [
-      { id: "r-auditor",  name: "Auditor",   secondary: "4 members",   suggestedWindow: "oneTime",      signal: "Compliance quarterly review",   risk: "low" },
-      { id: "r-rodba",    name: "Read-only DBA", secondary: "Not yet assigned", suggestedWindow: "workingHours", signal: "Proposed by Platform lead",  risk: "low" },
-      { id: "r-enduser",  name: "End User",  secondary: "146 members", suggestedWindow: "oneTime",      signal: "Direct DB access not typical",   risk: "high" },
+      { id: "r-auditor", name: "Auditor",       secondary: "4 members",       suggestedWindow: "oneTime",      signal: "Compliance quarterly review", risk: "low" },
+      { id: "r-rodba",   name: "Read-only DBA", secondary: "Not yet assigned", suggestedWindow: "workingHours", signal: "Proposed by Platform lead",  risk: "low" },
+      { id: "r-enduser", name: "End User",      secondary: "146 members",     suggestedWindow: "oneTime",      signal: "Direct DB access not typical", risk: "high" },
     ],
   },
 });
@@ -362,27 +364,26 @@ const AccessWindowCell = ({ window: w, resource }) => {
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <span style={{ width: 6, height: 6, borderRadius: "50%", background: meta.dot, flexShrink: 0 }}/>
-        <span style={{ font: "700 12.5px/1.2 Arial, sans-serif", color: "#0F0F0F" }}>{meta.label}</span>
+        <span style={{ font: "600 12.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{meta.label}</span>
       </div>
       {w.type === "custom" && (
-        <div style={{ display: "flex", alignItems: "center", gap: 6, font: "400 11.5px/1.3 Arial, sans-serif", color: w.expiring ? "#C7541B" : "#4A4A4A" }}>
-          <span>Ends {w.expiresAt}</span>
-          {w.remaining && <span>· {w.remaining}</span>}
+        <div style={{ font: "400 12px/1.3 var(--font-sans)", color: w.expiring ? "var(--warning-fg)" : "var(--fg-3)" }}>
+          Ends {w.expiresAt}{w.remaining ? ` · ${w.remaining}` : ""}
         </div>
       )}
       {w.type === "zeroday" && (
-        <div style={{ font: "400 11.5px/1.3 Arial, sans-serif", color: "#B45309" }}>Ends today · 23:59</div>
+        <div style={{ font: "400 12px/1.3 var(--font-sans)", color: "var(--warning-fg)" }}>Ends today · 23:59</div>
       )}
       {w.type === "workingHours" && (
-        <div style={{ font: "400 11.5px/1.3 Arial, sans-serif", color: "#4A4A4A" }}>Mon–Fri · 09:00–18:00</div>
+        <div style={{ font: "400 12px/1.3 var(--font-sans)", color: "var(--fg-3)" }}>Mon–Fri · 09:00–18:00</div>
       )}
       {w.type === "oneTime" && (
-        <div style={{ font: "400 11.5px/1.3 Arial, sans-serif", color: "#4A4A4A" }}>{w.used ? "Used · session ended" : "First session · not yet used"}</div>
+        <div style={{ font: "400 12px/1.3 var(--font-sans)", color: "var(--fg-3)" }}>{w.used ? "Used · session ended" : "First session · not yet used"}</div>
       )}
       {flagNoExpiry && (
-        <span className={critical ? "chip chip-warn" : "chip chip-neutral"} style={{ alignSelf: "flex-start" }}>
+        <span className={critical ? "badge badge-warning" : "badge"} style={{ alignSelf: "flex-start", gap: 4 }}>
           {critical && <Icon name="alert-triangle" size={10}/>}
-          NO EXPIRY SET
+          No expiry set
         </span>
       )}
     </div>
@@ -391,9 +392,9 @@ const AccessWindowCell = ({ window: w, resource }) => {
 
 const RiskChip = ({ level }) => {
   const map = {
-    low:  { cls: "chip chip-ok",     label: "Low risk" },
-    med:  { cls: "chip chip-orange", label: "Medium" },
-    high: { cls: "chip chip-danger", label: "High risk" },
+    low:  { cls: "badge badge-success", label: "Low" },
+    med:  { cls: "badge badge-warning", label: "Medium" },
+    high: { cls: "badge badge-danger",  label: "High" },
   };
   const m = map[level] || map.low;
   return <span className={m.cls}>{m.label}</span>;
@@ -402,343 +403,163 @@ const RiskChip = ({ level }) => {
 const SubjectCell = ({ kind, name, secondary, pending }) => (
   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
     {kind === "user"
-      ? <Avatar name={name} size={28}/>
-      : <div style={{ width: 28, height: 28, borderRadius: 3, background: "#FFF1EB", color: "#B4471C", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-          <Icon name={kind === "role" ? "shield" : "people"} size={14}/>
+      ? <Avatar name={name} size={26}/>
+      : <div style={{ width: 26, height: 26, borderRadius: 6, background: "var(--brand-soft)", color: "var(--brand-fg)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <Icon name={kind === "role" ? "shield" : "people"} size={13}/>
         </div>}
     <div style={{ minWidth: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <span className="h-primary">{name}</span>
-        {pending && <span className="chip chip-orange" title={`Requested ${pending.requestedAt}`}>PENDING · {pending.ticket}</span>}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        <span style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{name}</span>
+        {pending && <span className="badge badge-brand" title={`Requested ${pending.requestedAt}`}>Pending · {pending.ticket}</span>}
       </div>
-      <div className="h-secondary">{secondary}</div>
+      <div style={{ font: "400 12px/1.35 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>{secondary}</div>
     </div>
   </div>
 );
 
-const WaveDivider = ({ width = 52, opacity = 0.7 }) => (
-  <svg width={width} height="6" viewBox="0 0 52 6" style={{ marginLeft: 10, flexShrink: 0 }} aria-hidden="true">
-    <path d="M0 3 Q 6.5 0, 13 3 T 26 3 T 39 3 T 52 3" fill="none" stroke="#E85D26" strokeWidth="1" opacity={opacity}/>
-  </svg>
-);
-
-const BackgroundWave = () => (
-  <svg viewBox="0 0 800 40" preserveAspectRatio="none" style={{ width: "100%", height: 28, marginTop: -8 }} aria-hidden="true">
-    <path d="M0 20 Q 50 4, 100 20 T 200 20 T 300 20 T 400 20 T 500 20 T 600 20 T 700 20 T 800 20" fill="none" stroke="#E85D26" strokeWidth="1" opacity="0.28"/>
-  </svg>
-);
-
-const SectionHeader = ({ label, count, hint }) => (
-  <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "14px 0 10px" }}>
-    <span className="sec-label">{label}</span>
-    <span className="chip chip-neutral" style={{ marginLeft: 8 }}>{count}</span>
-    <WaveDivider/>
-    {hint && <span className="h-secondary" style={{ marginLeft: 12 }}>{hint}</span>}
+const AccessSectionLabel = ({ text, count }) => (
+  <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "14px 0 10px" }}>
+    <span style={{ font: "600 11px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>{text}</span>
+    <span className="badge">{count}</span>
   </div>
 );
 
-const AccessTab = ({ r, onRevoke, onAllocate }) => {
-  React.useEffect(() => {
-    if (document.getElementById("pam-access-v3-css")) return;
-    const s = document.createElement("style");
-    s.id = "pam-access-v3-css";
-    s.textContent = `
-      .pam-access-v3 {
-        --acc-orange: #E85D26;
-        --acc-orange-soft: #FFF1EB;
-        --acc-orange-fg: #B4471C;
-        --acc-ink: #0F0F0F;
-        --acc-ink-3: #4A4A4A;
-        --acc-ink-4: #7A7A7A;
-        --acc-line: #E7E5E4;
-        --acc-line-soft: #F7F5F4;
-        --acc-warn: #C7541B;
-        --acc-warn-soft: #FFEEDF;
-        --acc-danger: #B91C1C;
-        --acc-danger-soft: #FEE2E2;
-        --acc-ok: #15803D;
-        --acc-ok-soft: #DCFCE7;
-        font-family: Arial, Helvetica, sans-serif;
-        color: var(--acc-ink);
-      }
-      .pam-access-v3 .sec-label {
-        font: 700 10.5px/1 Arial, sans-serif;
-        color: var(--acc-ink-3);
-        letter-spacing: 1.6px;
-        text-transform: uppercase;
-      }
-      .pam-access-v3 .h-primary {
-        font: 700 13.5px/1.3 Arial, sans-serif;
-        color: var(--acc-ink);
-      }
-      .pam-access-v3 .h-secondary {
-        font: 400 12px/1.4 Arial, sans-serif;
-        color: var(--acc-ink-4);
-        margin-top: 2px;
-      }
-      .pam-access-v3 .pivot-btn {
-        padding: 10px 18px 12px;
-        background: transparent;
-        border: none;
-        border-bottom: 2px solid transparent;
-        font: 700 13px/1 Arial, sans-serif;
-        color: var(--acc-ink-4);
-        letter-spacing: 0.4px;
-        cursor: pointer;
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-      }
-      .pam-access-v3 .pivot-btn:hover { color: var(--acc-ink); }
-      .pam-access-v3 .pivot-btn.active {
-        color: var(--acc-orange);
-        border-bottom-color: var(--acc-orange);
-      }
-      .pam-access-v3 .pivot-btn .count {
-        background: var(--acc-line-soft);
-        color: var(--acc-ink-3);
-        font: 700 11px/1 Arial, sans-serif;
-        padding: 3px 7px;
-        border-radius: 999px;
-      }
-      .pam-access-v3 .pivot-btn.active .count {
-        background: var(--acc-orange-soft);
-        color: var(--acc-orange-fg);
-      }
-      .pam-access-v3 .card-v3 {
-        background: #fff;
-        border: 1px solid var(--acc-line);
-        border-radius: 4px;
-        overflow: hidden;
-      }
-      .pam-access-v3 .card-v3.allocated { box-shadow: inset 3px 0 0 var(--acc-orange); }
-      .pam-access-v3 .card-v3.not-allocated { box-shadow: inset 3px 0 0 var(--acc-ink-4); }
-      .pam-access-v3 table.tbl {
-        width: 100%;
-        border-collapse: collapse;
-      }
-      .pam-access-v3 table.tbl th {
-        text-align: left;
-        padding: 10px 16px;
-        font: 700 10.5px/1 Arial, sans-serif;
-        color: var(--acc-ink-4);
-        letter-spacing: 1.2px;
-        text-transform: uppercase;
-        border-bottom: 1px solid var(--acc-line);
-        background: var(--acc-line-soft);
-      }
-      .pam-access-v3 table.tbl td {
-        padding: 14px 16px;
-        border-bottom: 1px solid var(--acc-line);
-        font: 400 13px/1.4 Arial, sans-serif;
-        color: var(--acc-ink);
-        vertical-align: middle;
-      }
-      .pam-access-v3 table.tbl tr:last-child td { border-bottom: none; }
-      .pam-access-v3 table.tbl tbody tr:hover td { background: #FDFBFA; }
-      .pam-access-v3 .chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        padding: 3px 7px;
-        font: 700 10px/1.3 Arial, sans-serif;
-        letter-spacing: 0.5px;
-        border-radius: 3px;
-        text-transform: uppercase;
-      }
-      .pam-access-v3 .chip-warn      { background: var(--acc-warn-soft);   color: var(--acc-warn); }
-      .pam-access-v3 .chip-danger    { background: var(--acc-danger-soft); color: var(--acc-danger); }
-      .pam-access-v3 .chip-ok        { background: var(--acc-ok-soft);     color: var(--acc-ok); }
-      .pam-access-v3 .chip-orange    { background: var(--acc-orange-soft); color: var(--acc-orange-fg); }
-      .pam-access-v3 .chip-neutral   { background: var(--acc-line-soft);   color: var(--acc-ink-3); }
-      .pam-access-v3 .btn-orange {
-        background: var(--acc-orange);
-        color: #fff;
-        border: none;
-        border-radius: 3px;
-        padding: 9px 16px;
-        font: 700 12.5px/1 Arial, sans-serif;
-        letter-spacing: 0.3px;
-        cursor: pointer;
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-      }
-      .pam-access-v3 .btn-orange:hover { background: #D14E1D; }
-      .pam-access-v3 .btn-outline {
-        background: #fff;
-        color: var(--acc-ink);
-        border: 1px solid var(--acc-line);
-        border-radius: 3px;
-        padding: 7px 13px;
-        font: 700 12.5px/1 Arial, sans-serif;
-        cursor: pointer;
-      }
-      .pam-access-v3 .btn-outline:hover { border-color: var(--acc-ink-4); }
-      .pam-access-v3 .btn-danger-ghost {
-        background: transparent;
-        color: var(--acc-danger);
-        border: none;
-        font: 700 12.5px/1 Arial, sans-serif;
-        cursor: pointer;
-        padding: 6px 10px;
-      }
-      .pam-access-v3 .btn-danger-ghost:hover { background: var(--acc-danger-soft); border-radius: 3px; }
-      .pam-access-v3 .btn-link-orange {
-        background: transparent;
-        color: var(--acc-orange);
-        border: none;
-        font: 700 12.5px/1 Arial, sans-serif;
-        cursor: pointer;
-        padding: 6px 10px;
-        display: inline-flex;
-        align-items: center;
-        gap: 5px;
-      }
-      .pam-access-v3 .btn-link-orange:hover { background: var(--acc-orange-soft); border-radius: 3px; }
-      .pam-access-v3 .empty {
-        padding: 34px 20px;
-        text-align: center;
-        font: 400 13px/1.5 Arial, sans-serif;
-        color: var(--acc-ink-4);
-        background: #FDFBFA;
-      }
-    `;
-    document.head.appendChild(s);
-  }, []);
-
+const AccessSection = ({ r, onRevoke, onAllocate }) => {
   const [pivot, setPivot] = React.useState("user");
   const data = React.useMemo(() => buildAccessData(r), [r]);
   const active = data[pivot];
   const pivotLabel = pivot === "user" ? "By user" : pivot === "group" ? "By group" : "By role";
   const subjectHeader = pivot === "user" ? "User" : pivot === "group" ? "Group · members" : "Role · members";
-
-  const openAllocate = (row) => onAllocate && onAllocate({ kind: pivot, subject: row ? { id: row.id, name: row.name, secondary: row.secondary, pending: row.pending } : null, suggestedWindow: row?.suggestedWindow });
+  const openAllocate = (row) => onAllocate && onAllocate({
+    kind: pivot,
+    subject: row ? { id: row.id, name: row.name, secondary: row.secondary, pending: row.pending } : null,
+    suggestedWindow: row?.suggestedWindow,
+  });
 
   return (
-    <div className="pam-access-v3" style={{ padding: "22px 24px 40px" }}>
-      {/* Scoped header — orientation to this resource */}
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 20, marginBottom: 6 }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="sec-label" style={{ display: "flex", alignItems: "center" }}>
-            Access · scope <span style={{ marginLeft: 6, color: "#0F0F0F" }}>{r.name}</span>
-            <WaveDivider width={68}/>
-          </div>
-          <div style={{ marginTop: 8, font: "400 12.5px/1.5 Arial, sans-serif", color: "#4A4A4A", maxWidth: 640 }}>
-            Who holds access to this resource, who else could be granted access, and how each grant expires.
-            {r.criticality === "critical" && <span style={{ marginLeft: 6, color: "#C7541B", fontWeight: 700 }}>Critical resource — lifelong grants are flagged for review.</span>}
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
-          <button className="btn-outline">Export access list</button>
-          <button className="btn-orange" onClick={() => openAllocate(null)}>
-            <Icon name="plus" size={12} color="#fff"/> Allocate access
-          </button>
-        </div>
+    <div>
+      <div className="card-header">
+        <span className="h-card">Access</span>
+        <span className="t-tiny" style={{ color: "var(--fg-4)", fontWeight: 400 }}>
+          Who holds access to this resource, who else could be granted access, and how each grant expires.
+        </span>
+        <div style={{ flex: 1 }}/>
+        <button className="btn btn-sm"><Icon name="download" size={11}/> Export access list</button>
+        <button className="btn btn-primary btn-sm" onClick={() => openAllocate(null)}><Icon name="plus" size={11}/> Allocate access</button>
       </div>
-      <BackgroundWave/>
+
+      {r.criticality === "critical" && (
+        <div style={{ padding: "10px 20px", background: "var(--warning-soft)", color: "var(--warning-fg)", font: "500 12.5px/1.5 var(--font-sans)", display: "flex", alignItems: "center", gap: 8, borderBottom: "1px solid var(--border)" }}>
+          <Icon name="alert-triangle" size={13}/> Critical resource — lifelong grants without an expiry are flagged for compliance review.
+        </div>
+      )}
 
       {/* Pivot tabs */}
-      <div style={{ display: "flex", alignItems: "center", gap: 4, borderBottom: "1px solid var(--acc-line)", marginTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "0 20px", borderBottom: "1px solid var(--border)" }}>
         {[
-          { id: "user",  label: "By user",  total: data.user.allocated.length  + data.user.notAllocated.length },
+          { id: "user",  label: "By user",  total: data.user.allocated.length  + data.user.notAllocated.length  },
           { id: "group", label: "By group", total: data.group.allocated.length + data.group.notAllocated.length },
-          { id: "role",  label: "By role",  total: data.role.allocated.length  + data.role.notAllocated.length },
+          { id: "role",  label: "By role",  total: data.role.allocated.length  + data.role.notAllocated.length  },
         ].map(p => (
-          <button key={p.id} onClick={() => setPivot(p.id)} className={"pivot-btn " + (pivot === p.id ? "active" : "")}>
-            {p.label}<span className="count">{p.total}</span>
+          <button key={p.id} onClick={() => setPivot(p.id)} style={{
+            padding: "10px 14px", marginBottom: -1, border: "none", background: "transparent",
+            color: pivot === p.id ? "var(--fg-1)" : "var(--fg-3)",
+            font: "500 13px/1 var(--font-sans)",
+            borderBottom: `2px solid ${pivot === p.id ? "var(--brand)" : "transparent"}`,
+            cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
+          }}>
+            {p.label}
+            <span className={pivot === p.id ? "badge badge-brand" : "badge"}>{p.total}</span>
           </button>
         ))}
       </div>
 
-      {/* Allocated section */}
-      <SectionHeader
-        label={`${pivotLabel} · Allocated`}
-        count={active.allocated.length}
-        hint={active.allocated.length ? "Currently holding access to this resource." : null}
-      />
-      <div className="card-v3 allocated">
-        {active.allocated.length === 0 ? (
-          <div className="empty">No {pivotLabel.toLowerCase()} grants on this resource.</div>
-        ) : (
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th style={{ width: "26%" }}>{subjectHeader}</th>
-                <th style={{ width: "22%" }}>Access window</th>
-                <th style={{ width: "14%" }}>Last activity</th>
-                <th style={{ width: "12%" }}>Risk</th>
-                <th style={{ width: "18%" }}>Policy · credential</th>
-                <th style={{ width: "8%", textAlign: "right" }}></th>
-              </tr>
-            </thead>
-            <tbody>
-              {active.allocated.map(row => (
-                <tr key={row.id}>
-                  <td><SubjectCell kind={pivot} name={row.name} secondary={row.secondary}/></td>
-                  <td><AccessWindowCell window={row.window} resource={r}/></td>
-                  <td><span style={{ font: "400 12.5px/1.4 Arial, sans-serif", color: row.lastActivity === "Never" ? "#B45309" : "#4A4A4A" }}>{row.lastActivity}</span></td>
-                  <td><RiskChip level={row.risk}/></td>
-                  <td>
-                    <div style={{ font: "700 12px/1.3 Arial, sans-serif", color: "#0F0F0F" }}>{row.policy}</div>
-                    <div style={{ font: "400 11.5px/1.3 Arial, sans-serif", color: "#7A7A7A", marginTop: 2 }}>{row.credential}</div>
-                  </td>
-                  <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                    <button className="btn-danger-ghost" onClick={() => onRevoke(row.name)}>Revoke</button>
-                  </td>
+      <div style={{ padding: "6px 20px 20px" }}>
+        {/* Allocated section */}
+        <AccessSectionLabel text={`${pivotLabel} · Allocated`} count={active.allocated.length}/>
+        <div className="card" style={{ borderColor: "var(--border)" }}>
+          {active.allocated.length === 0 ? (
+            <div style={{ padding: 28, textAlign: "center", color: "var(--fg-4)", font: "400 13px/1.5 var(--font-sans)" }}>
+              No {pivotLabel.toLowerCase()} grants on this resource.
+            </div>
+          ) : (
+            <table className="table">
+              <thead>
+                <tr>
+                  <th style={{ width: "24%" }}>{subjectHeader}</th>
+                  <th style={{ width: "22%" }}>Access window</th>
+                  <th style={{ width: "14%" }}>Last activity</th>
+                  <th style={{ width: "10%" }}>Risk</th>
+                  <th style={{ width: "22%" }}>Policy · credential</th>
+                  <th style={{ width: "8%", textAlign: "right" }}></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      {/* Not Allocated section */}
-      <SectionHeader
-        label={`${pivotLabel} · Not allocated`}
-        count={active.notAllocated.length}
-        hint="Eligible for review — not currently granted access."
-      />
-      <div className="card-v3 not-allocated">
-        {active.notAllocated.length === 0 ? (
-          <div className="empty">No pending candidates for review.</div>
-        ) : (
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th style={{ width: "26%" }}>{subjectHeader}</th>
-                <th style={{ width: "22%" }}>Suggested window</th>
-                <th style={{ width: "26%" }}>Signal</th>
-                <th style={{ width: "12%" }}>Predicted risk</th>
-                <th style={{ width: "14%", textAlign: "right" }}></th>
-              </tr>
-            </thead>
-            <tbody>
-              {active.notAllocated.map(row => {
-                const wMeta = ACCESS_WINDOW_META[row.suggestedWindow] || ACCESS_WINDOW_META.custom;
-                return (
+              </thead>
+              <tbody>
+                {active.allocated.map(row => (
                   <tr key={row.id}>
-                    <td><SubjectCell kind={pivot} name={row.name} secondary={row.secondary} pending={row.pending}/></td>
-                    <td>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ width: 6, height: 6, borderRadius: "50%", background: wMeta.dot }}/>
-                        <span style={{ font: "700 12.5px/1.2 Arial, sans-serif" }}>{wMeta.label}</span>
-                      </div>
-                      <div style={{ font: "400 11.5px/1.3 Arial, sans-serif", color: "#7A7A7A", marginTop: 2 }}>Recommended</div>
-                    </td>
-                    <td><span style={{ font: "400 12.5px/1.4 Arial, sans-serif", color: "#4A4A4A" }}>{row.signal}</span></td>
+                    <td><SubjectCell kind={pivot} name={row.name} secondary={row.secondary}/></td>
+                    <td><AccessWindowCell window={row.window} resource={r}/></td>
+                    <td style={{ fontSize: 12.5, color: row.lastActivity === "Never" ? "var(--warning-fg)" : "var(--fg-2)" }}>{row.lastActivity}</td>
                     <td><RiskChip level={row.risk}/></td>
+                    <td>
+                      <div style={{ font: "500 12.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{row.policy}</div>
+                      <div className="t-mono" style={{ fontSize: 11.5, color: "var(--fg-3)", marginTop: 2 }}>{row.credential}</div>
+                    </td>
                     <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                      <button className="btn-link-orange" onClick={() => openAllocate(row)}>
-                        {row.pending ? "Review & allocate" : "Allocate"} <Icon name="chevron-right" size={11} color="#E85D26"/>
-                      </button>
+                      <button className="btn btn-ghost btn-sm" style={{ color: "var(--danger-fg)" }} onClick={() => onRevoke(row.name)}>Revoke</button>
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Not Allocated section */}
+        <AccessSectionLabel text={`${pivotLabel} · Not allocated`} count={active.notAllocated.length}/>
+        <div className="card" style={{ borderColor: "var(--border)" }}>
+          {active.notAllocated.length === 0 ? (
+            <div style={{ padding: 28, textAlign: "center", color: "var(--fg-4)", font: "400 13px/1.5 var(--font-sans)" }}>
+              No pending candidates for review.
+            </div>
+          ) : (
+            <table className="table">
+              <thead>
+                <tr>
+                  <th style={{ width: "24%" }}>{subjectHeader}</th>
+                  <th style={{ width: "20%" }}>Suggested window</th>
+                  <th style={{ width: "28%" }}>Signal</th>
+                  <th style={{ width: "12%" }}>Predicted risk</th>
+                  <th style={{ width: "16%", textAlign: "right" }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {active.notAllocated.map(row => {
+                  const wMeta = ACCESS_WINDOW_META[row.suggestedWindow] || ACCESS_WINDOW_META.custom;
+                  return (
+                    <tr key={row.id}>
+                      <td><SubjectCell kind={pivot} name={row.name} secondary={row.secondary} pending={row.pending}/></td>
+                      <td>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ width: 6, height: 6, borderRadius: "50%", background: wMeta.dot }}/>
+                          <span style={{ font: "500 12.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{wMeta.label}</span>
+                        </div>
+                        <div style={{ font: "400 11.5px/1.3 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>Recommended</div>
+                      </td>
+                      <td style={{ fontSize: 12.5, color: "var(--fg-2)" }}>{row.signal}</td>
+                      <td><RiskChip level={row.risk}/></td>
+                      <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                        <button className="btn btn-primary btn-sm" onClick={() => openAllocate(row)}>
+                          {row.pending ? "Review & allocate" : "Allocate"}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
       </div>
     </div>
   );
