@@ -468,18 +468,22 @@ const ResourceAllocatePanelV3 = ({ resource, prefill, onClose, onAllocated }) =>
               </div>
             )}
 
-            {/* Section 2 · Access window — radio list on the left, live config on the right */}
+            {/* Section 2 · Access window — single column, selected radio expands vertically inline */}
             <div style={{ marginTop: 22 }}><AllocSectionHeader n="2" label="Access window"/></div>
-            <div style={{ display: "grid", gridTemplateColumns: "260px minmax(0, 1fr)", gap: 12, alignItems: "stretch" }}>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {ALLOC_WINDOW_OPTIONS.map(o => {
-                  const sel = windowType === o.id;
-                  return (
-                    <button key={o.id} onClick={() => setWindowType(o.id)} style={{
-                      padding: 10, border: `1px solid ${sel ? "var(--brand)" : "var(--border)"}`,
-                      background: sel ? "var(--brand-soft)" : "var(--bg-app)",
-                      borderRadius: 6, cursor: "pointer", textAlign: "left",
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {ALLOC_WINDOW_OPTIONS.map(o => {
+                const sel = windowType === o.id;
+                return (
+                  <div key={o.id} style={{
+                    border: `1px solid ${sel ? "var(--brand)" : "var(--border)"}`,
+                    borderRadius: 6,
+                    background: sel ? "var(--brand-soft)" : "var(--bg-app)",
+                    overflow: "hidden",
+                  }}>
+                    <button type="button" onClick={() => setWindowType(o.id)} style={{
                       display: "flex", alignItems: "flex-start", gap: 10,
+                      width: "100%", padding: 12, border: "none",
+                      background: "transparent", cursor: "pointer", textAlign: "left",
                     }}>
                       <span style={{ width: 14, height: 14, borderRadius: "50%", border: `2px solid ${sel ? "var(--brand)" : "var(--border-strong)"}`, display: "flex", alignItems: "center", justifyContent: "center", flex: "none", marginTop: 2 }}>
                         {sel && <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--brand)" }}/>}
@@ -493,18 +497,18 @@ const ResourceAllocatePanelV3 = ({ resource, prefill, onClose, onAllocated }) =>
                       </div>
                       <span className="badge" style={{ flex: "none", marginTop: 1 }}>{o.tag}</span>
                     </button>
-                  );
-                })}
-              </div>
-              <div className="card" style={{ padding: 16, background: "var(--bg-surface-2)", border: "1px solid var(--border-subtle)" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, paddingBottom: 10, borderBottom: "1px solid var(--border-subtle)" }}>
-                  <Icon name={windowMeta?.icon} size={14} color="var(--brand-fg)"/>
-                  <span style={{ font: "600 13px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>Configure · {windowMeta?.label}</span>
-                  <div style={{ flex: 1 }}/>
-                  <span className="t-tiny" style={{ color: "var(--fg-4)", fontWeight: 400 }}>{windowMeta?.hint}</span>
-                </div>
-                <AllocWindowSettings windowType={windowType} config={windowConfig} setConfig={setWindowConfig} resource={resource}/>
-              </div>
+                    {sel && (
+                      <div style={{
+                        padding: 14,
+                        borderTop: "1px solid var(--border-subtle)",
+                        background: "var(--bg-surface)",
+                      }}>
+                        <AllocWindowSettings windowType={o.id} config={windowConfig} setConfig={setWindowConfig} resource={resource}/>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
 
             {/* Section 3 · Governing policy */}
