@@ -1,5 +1,15 @@
-// Resource Add Panel — full-page slide-in panel with 4-step wizard
-// Step 0: choose entry method | Step 1: basic info | Step 2: creds | Step 3: policy | Step 4: access | Step 5: success
+// Resource Add Panel — V3 rewrite.
+// Panel-based slide-in with two admin flows:
+//   • Manual — 3-step wizard: Resource + Root credential → Review PAM
+//     configuration → Confirm. PAM infers rotation policy, local-account
+//     handling, and reconciliation account from env × criticality and the
+//     root credential type. Only the root credential itself requires
+//     deliberate admin input; everything else is a reviewable override.
+//   • Bulk — after CSV / AD / network scan seeds a candidate list, the
+//     admin edits per-row criticality, supplies a root credential
+//     (individual or shared), and submits. Every row is onboarded through
+//     the same PAM-inferred path in the background; the result screen
+//     reports per-row outcomes with a retry that only re-runs failures.
 
 const PANEL_BACKDROP = {
   position: "fixed", inset: 0, background: "rgba(15, 23, 42, 0.45)",
@@ -31,38 +41,31 @@ const Panel = ({ title, onClose, children, footer, back }) => (
   </div>
 );
 
-const StepIndicator = ({ step }) => {
-  const steps = [
-    { n: 1, label: "Basic info" },
-    { n: 2, label: "Credentials" },
-    { n: 3, label: "Policy" },
-    { n: 4, label: "Access" },
-  ];
-  return (
-    <div style={{ display: "flex", alignItems: "center", padding: "16px 24px", gap: 8, borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-surface)" }}>
-      {steps.map((s, i) => {
-        const done = step > s.n;
-        const active = step === s.n;
-        return (
-          <React.Fragment key={s.n}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{
-                width: 22, height: 22, borderRadius: "50%",
-                background: done ? "var(--success)" : active ? "var(--brand)" : "var(--bg-surface-2)",
-                color: done || active ? "#fff" : "var(--fg-3)",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                font: "600 11px/1 var(--font-sans)", flex: "none",
-                border: !done && !active ? "1px solid var(--border)" : "none",
-              }}>{done ? <Icon name="check" size={11} color="#fff"/> : s.n}</div>
-              <span style={{ font: `${active ? 600 : 500} 12.5px/1 var(--font-sans)`, color: active ? "var(--fg-1)" : done ? "var(--fg-2)" : "var(--fg-4)" }}>{s.label}</span>
-            </div>
-            {i < steps.length - 1 && <div style={{ flex: 1, height: 1, background: done ? "var(--success)" : "var(--border)", maxWidth: 48 }}/>}
-          </React.Fragment>
-        );
-      })}
-    </div>
-  );
-};
+// Generic step indicator — pass the step number + a list of { n, label }.
+const StepIndicator = ({ step, steps }) => (
+  <div style={{ display: "flex", alignItems: "center", padding: "16px 24px", gap: 8, borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-surface)" }}>
+    {steps.map((s, i) => {
+      const done = step > s.n;
+      const active = step === s.n;
+      return (
+        <React.Fragment key={s.n}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{
+              width: 22, height: 22, borderRadius: "50%",
+              background: done ? "var(--success)" : active ? "var(--brand)" : "var(--bg-surface-2)",
+              color: done || active ? "#fff" : "var(--fg-3)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              font: "600 11px/1 var(--font-sans)", flex: "none",
+              border: !done && !active ? "1px solid var(--border)" : "none",
+            }}>{done ? <Icon name="check" size={11} color="#fff"/> : s.n}</div>
+            <span style={{ font: `${active ? 600 : 500} 12.5px/1 var(--font-sans)`, color: active ? "var(--fg-1)" : done ? "var(--fg-2)" : "var(--fg-4)" }}>{s.label}</span>
+          </div>
+          {i < steps.length - 1 && <div style={{ flex: 1, height: 1, background: done ? "var(--success)" : "var(--border)", maxWidth: 64 }}/>}
+        </React.Fragment>
+      );
+    })}
+  </div>
+);
 
 const Field = ({ label, required, hint, error, children }) => (
   <label style={{ display: "block" }}>
@@ -103,33 +106,21 @@ const Segmented = ({ value, options, onChange }) => (
   </div>
 );
 
-// ---- Step 0: entry method selector ----
+// ─── Entry-method picker (unchanged from the previous build) ────────────────
 const EntryMethodCards = ({ onPick }) => {
   const groups = [
-    {
-      label: "Single resource",
-      cards: [
-        { id: "manual", icon: "edit", title: "Add manually", sub: "Configure one server, database, or app by entering its details", cta: "Continue" },
-      ],
-    },
-    {
-      label: "Discover at scale",
-      cards: [
-        { id: "scan",   icon: "discovery", title: "Network scan",        sub: "Sweep an IP range or subnet to find unmanaged assets", cta: "Set up scan",  badge: "Recommended" },
-        { id: "cloud",  icon: "cloud",     title: "Cloud discovery",     sub: "Pull resources from AWS, Azure, GCP via connected accounts", cta: "Choose provider" },
-        { id: "ad",     icon: "people",    title: "Import from AD",      sub: "Pull machines from your connected Active Directory", cta: "Import" },
-        { id: "k8s",    icon: "cloud",     title: "Kubernetes clusters", sub: "Discover workloads and nodes from a kubeconfig",     cta: "Connect cluster" },
-      ],
-    },
-    {
-      label: "Bulk import",
-      cards: [
-        { id: "csv",    icon: "file-text", title: "CSV upload",          sub: "Upload a spreadsheet using our template", cta: "Upload file" },
-        { id: "api",    icon: "key",       title: "API / Terraform",     sub: "Programmatic onboarding via REST or Terraform provider", cta: "View docs" },
-      ],
-    },
+    { label: "Single resource", cards: [{ id: "manual", icon: "edit", title: "Add manually", sub: "Configure one server, database, or app by entering its details", cta: "Continue" }] },
+    { label: "Discover at scale", cards: [
+      { id: "scan",   icon: "discovery", title: "Network scan",        sub: "Sweep an IP range or subnet to find unmanaged assets", cta: "Set up scan",  badge: "Recommended" },
+      { id: "cloud",  icon: "cloud",     title: "Cloud discovery",     sub: "Pull resources from AWS, Azure, GCP via connected accounts", cta: "Choose provider" },
+      { id: "ad",     icon: "people",    title: "Import from AD",      sub: "Pull machines from your connected Active Directory", cta: "Import" },
+      { id: "k8s",    icon: "cloud",     title: "Kubernetes clusters", sub: "Discover workloads and nodes from a kubeconfig",     cta: "Connect cluster" },
+    ]},
+    { label: "Bulk import", cards: [
+      { id: "csv",    icon: "file-text", title: "CSV upload",       sub: "Upload a spreadsheet using our template", cta: "Upload file" },
+      { id: "api",    icon: "key",       title: "API / Terraform",  sub: "Programmatic onboarding via REST or Terraform provider", cta: "View docs" },
+    ]},
   ];
-
   const Card = ({ c }) => (
     <button onClick={() => onPick(c.id)} style={{
       position: "relative",
@@ -155,7 +146,6 @@ const EntryMethodCards = ({ onPick }) => {
       </div>
     </button>
   );
-
   return (
     <div style={{ padding: 28, maxWidth: 880, margin: "0 auto" }}>
       <div style={{ marginBottom: 20 }}>
@@ -170,134 +160,6 @@ const EntryMethodCards = ({ onPick }) => {
           </div>
         </div>
       ))}
-    </div>
-  );
-};
-
-// ---- Step 1: basic info ----
-const PORT_DEFAULTS = { mysql: 3306, postgres: 5432, mssql: 1433, oracle: 1521, mongodb: 27017, redis: 6379 };
-
-const Step1Basic = ({ data, setData }) => {
-  const t = data.type;
-  const showServer = t === "server";
-  const showDb     = t === "database";
-  const showWeb    = t === "web";
-  const showDesktop= t === "desktop";
-
-  return (
-    <div style={{ padding: "20px 24px 8px", maxWidth: 720, display: "flex", flexDirection: "column", gap: 20 }}>
-      <Field label="Resource type" required>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
-          <Pill active={t==="server"}  icon="server"   onClick={() => setData(d => ({...d, type: "server", port: 22}))}>Server</Pill>
-          <Pill active={t==="database"}icon="database" onClick={() => setData(d => ({...d, type: "database", port: 3306, dbApp: "mysql"}))}>Database</Pill>
-          <Pill active={t==="web"}     icon="web"      onClick={() => setData(d => ({...d, type: "web", port: 443}))}>Web app</Pill>
-          <Pill active={t==="desktop"} icon="desktop"  onClick={() => setData(d => ({...d, type: "desktop"}))}>Desktop app</Pill>
-        </div>
-      </Field>
-
-      {showServer && <>
-        <Field label="Display name" required hint="Give this server a recognizable name">
-          <input className="input" value={data.name} onChange={e => setData(d => ({...d, name: e.target.value}))} placeholder="e.g. prod-web-01"/>
-        </Field>
-        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 14 }}>
-          <Field label="IP address / hostname" required>
-            <input className="input" value={data.host} onChange={e => setData(d => ({...d, host: e.target.value}))} placeholder="10.42.18.7 or web01.kestrel.internal"/>
-          </Field>
-          <Field label="Port" required>
-            <input className="input t-mono" type="number" value={data.port} onChange={e => setData(d => ({...d, port: +e.target.value}))}/>
-          </Field>
-        </div>
-        <Field label="OS type">
-          <Select value={data.os || "linux"} onChange={v => setData(d => ({...d, os: v}))} options={[["linux","Linux"],["windows","Windows"],["macos","macOS"],["other","Other"]]}/>
-        </Field>
-      </>}
-
-      {showDb && <>
-        <Field label="Display name" required>
-          <input className="input" value={data.name} onChange={e => setData(d => ({...d, name: e.target.value}))} placeholder="e.g. prod-db-primary"/>
-        </Field>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr 1fr", gap: 14 }}>
-          <Field label="Database app" required>
-            <Select value={data.dbApp || "mysql"} onChange={v => setData(d => ({...d, dbApp: v, port: PORT_DEFAULTS[v]}))} options={[["mysql","MySQL"],["postgres","PostgreSQL"],["mssql","MSSQL"],["oracle","Oracle"],["mongodb","MongoDB"],["redis","Redis"]]}/>
-          </Field>
-          <Field label="IP / hostname" required>
-            <input className="input" value={data.host} onChange={e => setData(d => ({...d, host: e.target.value}))} placeholder="10.42.18.7"/>
-          </Field>
-          <Field label="Port" required>
-            <input className="input t-mono" type="number" value={data.port} onChange={e => setData(d => ({...d, port: +e.target.value}))}/>
-          </Field>
-        </div>
-        <Field label="Database name" required>
-          <input className="input" value={data.dbName || ""} onChange={e => setData(d => ({...d, dbName: e.target.value}))} placeholder="ledger_prod"/>
-        </Field>
-        <Field label="SSL / TLS">
-          <Toggle value={!!data.ssl} onChange={v => setData(d => ({...d, ssl: v}))} label="Require encrypted connections"/>
-        </Field>
-      </>}
-
-      {showWeb && <>
-        <Field label="Display name" required>
-          <input className="input" value={data.name} onChange={e => setData(d => ({...d, name: e.target.value}))} placeholder="e.g. kestrel-admin-portal"/>
-        </Field>
-        <Field label="URL" required hint="Must include protocol — https://...">
-          <input className="input" value={data.host} onChange={e => setData(d => ({...d, host: e.target.value}))} placeholder="https://admin.kestrel.io"/>
-        </Field>
-        <Field label="Auth method">
-          <Select value={data.authMethod || "form"} onChange={v => setData(d => ({...d, authMethod: v}))} options={[["form","Form-based"],["sso","SSO"],["basic","Basic auth"]]}/>
-        </Field>
-      </>}
-
-      {showDesktop && <>
-        <Field label="Display name" required>
-          <input className="input" value={data.name} onChange={e => setData(d => ({...d, name: e.target.value}))} placeholder="e.g. salesforce-desktop"/>
-        </Field>
-        <Field label="Executable path or app name" required>
-          <input className="input t-mono" value={data.host} onChange={e => setData(d => ({...d, host: e.target.value}))} placeholder="C:\\Program Files\\App\\app.exe"/>
-        </Field>
-        <Field label="Platform">
-          <Select value={data.platform || "windows"} onChange={v => setData(d => ({...d, platform: v}))} options={[["windows","Windows"],["macos","macOS"],["linux","Linux"]]}/>
-        </Field>
-      </>}
-
-      <Field label="Description">
-        <textarea className="input" rows={2} value={data.description || ""} onChange={e => setData(d => ({...d, description: e.target.value}))} placeholder="Optional"/>
-      </Field>
-
-      {/* Classification */}
-      <div style={{ borderTop: "1px solid var(--border-subtle)", paddingTop: 18, display: "flex", flexDirection: "column", gap: 16 }}>
-        <div style={{ font: "500 11px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7 }}>Classification</div>
-        <Field label="Criticality" required>
-          <Segmented value={data.criticality || "medium"} onChange={v => setData(d => ({...d, criticality: v}))}
-            options={[{value:"critical",label:"Critical"},{value:"high",label:"High"},{value:"medium",label:"Medium"},{value:"low",label:"Low"}]}/>
-        </Field>
-        <Field label="Environment" required>
-          <Segmented value={data.env || "production"} onChange={v => setData(d => ({...d, env: v}))}
-            options={[{value:"production",label:"Production"},{value:"dev",label:"Dev"},{value:"test",label:"Test"},{value:"staging",label:"Staging"}]}/>
-        </Field>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-          <Field label="Owner / team">
-            <input className="input" value={data.owner || ""} onChange={e => setData(d => ({...d, owner: e.target.value}))} placeholder="Optional — DevOps, Platform team…"/>
-          </Field>
-          <Field label="Tags">
-            <input className="input" value={data.tags || ""} onChange={e => setData(d => ({...d, tags: e.target.value}))} placeholder="pci, fintech, prod"/>
-          </Field>
-        </div>
-      </div>
-
-      {/* Advanced settings */}
-      <Disclosure label="Advanced settings">
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <Toggle
-            value={!!data.credLess}
-            onChange={v => setData(d => ({...d, credLess: v}))}
-            label="Credential-less access"
-            hint="Users connect via proxy injection. Passwords are never shown. Recommended for high-privilege systems."
-          />
-          <Field label="Notes">
-            <textarea className="input" rows={2} value={data.notes || ""} onChange={e => setData(d => ({...d, notes: e.target.value}))} placeholder="Internal context — owners, runbook links, etc."/>
-          </Field>
-        </div>
-      </Disclosure>
     </div>
   );
 };
@@ -344,380 +206,545 @@ const Disclosure = ({ label, children, defaultOpen }) => {
   );
 };
 
-// ---- Step 2: credentials ----
-const Step2Creds = ({ data, setData }) => {
-  const [createOpen, setCreateOpen] = React.useState(data.creds.length === 0);
-  const [reconOpen, setReconOpen] = React.useState(false);
-  const [draft, setDraft] = React.useState({ name: "", username: "", credType: "password", password: "", complete: true });
-  const [testIdx, setTestIdx] = React.useState(null);
+// ─── PAM-suggested tag ──────────────────────────────────────────────────────
+// Small brand-tinted outline pill placed next to any field/card PAM auto-
+// filled from inference. Signals "this was inferred, override if you want."
+const PamSuggestedTag = () => (
+  <span style={{
+    display: "inline-flex", alignItems: "center", gap: 4,
+    padding: "3px 8px", borderRadius: 10,
+    border: "1px solid var(--brand)", background: "var(--bg-app)",
+    font: "600 10px/1 var(--font-sans)", color: "var(--brand-fg)",
+    letterSpacing: 0.5, textTransform: "uppercase",
+    whiteSpace: "nowrap",
+  }}>
+    <Icon name="sparkles" size={9} color="var(--brand-fg)"/>
+    PAM-suggested
+  </span>
+);
 
-  const testResult = (i) => {
-    const c = data.creds[i];
-    if (c.username && c.username.includes("svc")) return { ok: false, msg: "Authentication failed — service account is locked. Reset password in AD or use a different admin account." };
-    return { ok: true, msg: "Authentication successful — PAM can access this resource with this credential." };
-  };
+// Callout used at the top of the Root-credential section. Brand-left-border
+// styling communicates "this is the one thing you must supply yourself."
+const HelperCallout = ({ children }) => (
+  <div style={{
+    borderLeft: "3px solid var(--brand)",
+    background: "var(--brand-soft)",
+    color: "var(--brand-fg)",
+    padding: "10px 14px",
+    font: "400 12.5px/1.5 var(--font-sans)",
+    borderRadius: 3,
+  }}>{children}</div>
+);
 
-  const addCred = () => {
-    if (!draft.name || !draft.username) return;
-    setData(d => ({...d, creds: [...d.creds, { ...draft, id: `tmp-${Date.now()}` }]}));
-    setDraft({ name: "", username: "", credType: "password", password: "", complete: true });
-    setCreateOpen(false);
-  };
-
-  return (
-    <div style={{ padding: "20px 24px 8px", maxWidth: 720 }}>
-      <h3 style={{ font: "600 14px/1.3 var(--font-sans)", color: "var(--fg-1)", margin: "0 0 4px" }}>Attach credentials to {data.name || "this resource"}</h3>
-      <p style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "0 0 18px" }}>Credentials are stored in the vault. Users never see raw passwords.</p>
-
-      {/* Attached creds list */}
-      {data.creds.length === 0 ? (
-        <div style={{ padding: 24, border: "1px dashed var(--border)", borderRadius: 8, textAlign: "center", color: "var(--fg-3)", fontSize: 12.5, marginBottom: 14 }}>
-          No credentials attached yet. Add one below.
-        </div>
-      ) : (
-        <table className="table" style={{ marginBottom: 14, border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
-          <thead><tr><th>Display name</th><th>Type</th><th>Username</th><th>Rotation</th><th></th></tr></thead>
-          <tbody>
-            {data.creds.map((c, i) => {
-              const tr = testIdx === i ? testResult(i) : null;
-              return (
-                <React.Fragment key={c.id}>
-                  <tr>
-                    <td style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{c.name}</td>
-                    <td><span className="badge" style={{ textTransform: "capitalize" }}>{c.credType === "password" ? "Password" : c.credType === "ssh" ? "SSH key" : "Extra params"}</span></td>
-                    <td className="t-mono" style={{ fontSize: 12, color: "var(--fg-2)" }}>{c.username}</td>
-                    <td style={{ fontSize: 12, color: "var(--fg-3)" }}>{c.adminAccount ? `Auto, via ${c.adminAccount}` : "Manual"}</td>
-                    <td style={{ textAlign: "right" }}>
-                      <button className="btn btn-ghost btn-sm" onClick={() => setTestIdx(testIdx === i ? null : i)}>Test</button>
-                      <button className="btn btn-ghost btn-sm" onClick={() => setData(d => ({...d, creds: d.creds.filter((_,j) => j !== i)}))}>Detach</button>
-                    </td>
-                  </tr>
-                  {tr && (
-                    <tr><td colSpan="5" style={{ background: tr.ok ? "var(--success-soft)" : "var(--danger-soft)", borderTop: "none" }}>
-                      <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "8px 4px", fontSize: 12.5, color: tr.ok ? "var(--success-fg)" : "var(--danger-fg)" }}>
-                        <Icon name={tr.ok ? "check-circle" : "alert-circle"} size={14}/>
-                        <span>{tr.msg}</span>
-                      </div>
-                    </td></tr>
-                  )}
-                </React.Fragment>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
-
-      {/* Add buttons */}
-      {!createOpen && (
-        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-          <button className="btn btn-sm">Attach existing credential</button>
-          <button className="btn btn-sm btn-primary" onClick={() => setCreateOpen(true)}><Icon name="plus" size={11}/> Create new credential</button>
-        </div>
-      )}
-
-      {createOpen && (
-        <div style={{ background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 18, display: "flex", flexDirection: "column", gap: 14, marginBottom: 14 }}>
-          <div style={{ font: "600 13px/1 var(--font-sans)", color: "var(--fg-1)" }}>New credential</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <Field label="Display name" required>
-              <input className="input" value={draft.name} onChange={e => setDraft(d => ({...d, name: e.target.value}))} placeholder="e.g. root-server-01"/>
-            </Field>
-            <Field label="Username" required>
-              <input className="input t-mono" value={draft.username} onChange={e => setDraft(d => ({...d, username: e.target.value}))} placeholder="root"/>
-            </Field>
-          </div>
-          <div>
-            <div style={{ font: "500 12px/1.4 var(--font-sans)", color: "var(--fg-2)", marginBottom: 8 }}>Credential type</div>
-            <div style={{ display: "flex", gap: 4, padding: 3, background: "var(--bg-surface-2)", borderRadius: 6, width: "fit-content" }}>
-              {[["password","Password"],["ssh","SSH key"],["params","Extra parameters"]].map(([v,l]) => (
-                <button key={v} type="button" onClick={() => setDraft(d => ({...d, credType: v}))} style={{
-                  padding: "6px 12px", border: "none", borderRadius: 4, cursor: "pointer",
-                  background: draft.credType === v ? "var(--bg-surface)" : "transparent",
-                  color: draft.credType === v ? "var(--fg-1)" : "var(--fg-3)",
-                  font: "500 12px/1 var(--font-sans)",
-                  boxShadow: draft.credType === v ? "0 1px 2px rgba(0,0,0,0.06), 0 0 0 1px var(--border)" : "none",
-                }}>{l}</button>
-              ))}
-            </div>
-          </div>
-          {draft.credType === "password" && <>
-            <Field label="Password" required>
-              <input className="input t-mono" type="password" value={draft.password} onChange={e => setDraft(d => ({...d, password: e.target.value}))} placeholder="••••••••"/>
-            </Field>
-            <Toggle value={draft.complete} onChange={v => setDraft(d => ({...d, complete: v}))} label="Mark as complete" hint="Disable to indicate this is a partial / placeholder credential"/>
-          </>}
-          {draft.credType === "ssh" && <>
-            <Field label="Certificate / key" required>
-              <textarea className="input t-mono" rows={3} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----..."/>
-            </Field>
-            <Field label="Passphrase">
-              <input className="input t-mono" type="password" placeholder="Optional"/>
-            </Field>
-          </>}
-          {draft.credType === "params" && <>
-            <Field label="Extra parameters">
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <input className="input" placeholder="Field name"/>
-                  <input className="input t-mono" placeholder="Value"/>
-                </div>
-                <button type="button" className="btn btn-sm btn-ghost" style={{ alignSelf: "flex-start", padding: "4px 0", color: "var(--brand-fg)" }}><Icon name="plus" size={11}/> Add another</button>
-              </div>
-            </Field>
-          </>}
-          <Field label="Admin account" hint="PAM uses this account to rotate the password automatically">
-            <Select value={draft.adminAccount || ""} onChange={v => setDraft(d => ({...d, adminAccount: v}))} options={[["","None"],["root-rotator","root-rotator"],["pam-svc","pam-svc"]]}/>
-          </Field>
-          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-            <button className="btn btn-sm btn-ghost" onClick={() => setCreateOpen(false)}>Cancel</button>
-            <button className="btn btn-sm btn-primary" onClick={addCred}>Add credential</button>
-          </div>
-        </div>
-      )}
-
-      {/* Reconciliation credential */}
-      <div style={{ background: "var(--bg-surface-2)", border: "1px dashed var(--border)", borderRadius: 8, padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
-        <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-          <div style={{ width: 32, height: 32, borderRadius: 6, background: "var(--warning-soft)", color: "var(--warning-fg)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
-            <Icon name="shield" size={15}/>
-          </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ font: "600 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>Reconciliation credential</div>
-            <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 2 }}>A backup admin account PAM uses if the primary credential becomes invalid.</div>
-          </div>
-          {!data.reconCred && <button className="btn btn-sm" onClick={() => setReconOpen(true)}><Icon name="plus" size={11}/> Attach</button>}
-        </div>
-        {data.reconCred && (
-          <div style={{ display: "flex", alignItems: "center", gap: 10, paddingTop: 6, borderTop: "1px solid var(--border-subtle)" }}>
-            <Icon name="check-circle" size={13} color="var(--success-fg)"/>
-            <span style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{data.reconCred.name}</span>
-            <span className="t-mono t-tiny" style={{ color: "var(--fg-3)" }}>{data.reconCred.username}</span>
-            <div style={{ flex: 1 }}/>
-            <button className="btn btn-ghost btn-sm" onClick={() => setData(d => ({...d, reconCred: null}))}>Detach</button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
+// ─── Type-aware defaults for Step 1 ─────────────────────────────────────────
+const TYPE_PORT_DEFAULT = { server: 22, database: 5432, web: 443, cloud: 443 };
+const TYPE_HOST_PLACEHOLDER = {
+  server:   "e.g. 10.42.18.7 or auth01.kestrel.internal",
+  database: "e.g. db.internal:5432",
+  web:      "e.g. https://admin.example.com",
+  cloud:    "e.g. eks.us-east-1:443",
 };
 
-// ---- Step 3: policy ----
-const Step3Policy = ({ data, setData }) => {
-  const [mode, setMode] = React.useState(data.policyId ? "existing" : "create");
-  const policyType = data.type === "server" ? "SSH/SFTP" : data.type === "database" ? "Database" : data.type === "web" ? "Web app" : "RDP/VNC";
+// ─── PAM inference catalogs ─────────────────────────────────────────────────
+const ADD_ROTATION_POLICIES = [
+  { id: "prod-daily",  name: "Prod-Daily-Rotation",   detail: "rotates every 24 hours", scopeSummary: "Production · Critical" },
+  { id: "prod-weekly", name: "Prod-Weekly-Rotation",  detail: "rotates every 7 days",   scopeSummary: "Production · High" },
+  { id: "std-30d",     name: "Std-30d-Rotation",      detail: "rotates every 30 days",  scopeSummary: "Medium / Low / non-prod" },
+  { id: "manual",      name: "Manual only",           detail: "never auto-rotates — vault reveals only", scopeSummary: "Only for targets that don't support automated rotation" },
+];
 
-  const existing = (window.SEED_POLICIES || []).slice(0, 4);
+const RECON_ACCOUNTS = [
+  { id: "backup-reconciliation-01",  name: "backup-reconciliation-01",  scope: "manages 24 other resources in this environment" },
+  { id: "backup-reconciliation-dev", name: "backup-reconciliation-dev", scope: "manages 9 resources in Development" },
+  { id: "reconciliation-jumpbox",    name: "reconciliation-jumpbox",    scope: "manages 6 bastion / jumpbox hosts" },
+];
 
+const cap = (s) => s ? s[0].toUpperCase() + s.slice(1) : s;
+
+const pickRotationPolicy = (env, crit) => {
+  if (env === "production" && crit === "critical") return "prod-daily";
+  if (env === "production" && crit === "high")     return "prod-weekly";
+  return "std-30d";
+};
+const pickReconAccount = (env) => env === "development" ? "backup-reconciliation-dev" : "backup-reconciliation-01";
+const rotationReason = (env, crit, policyId) => {
+  if (policyId === "prod-daily")  return `Selected because this resource is tagged ${cap(env)} + ${cap(crit)}.`;
+  if (policyId === "prod-weekly") return `Selected for ${cap(env)} resources at ${cap(crit)} criticality — daily rotation isn't required.`;
+  if (policyId === "std-30d")     return `${cap(env)} / ${cap(crit)} resources use the standard monthly cadence.`;
+  return "Manual only — you opted out of automated rotation.";
+};
+
+// ─── Step 1 · Resource details + Root credential ────────────────────────────
+const NewStep1RootCred = ({ data, setData }) => {
+  const setType = (t) => setData(d => ({ ...d, type: t, port: TYPE_PORT_DEFAULT[t] || 22 }));
+  const patch = (key, val) => setData(d => ({ ...d, [key]: val }));
   return (
-    <div style={{ padding: "20px 24px 8px", maxWidth: 720, display: "flex", flexDirection: "column", gap: 18 }}>
+    <div style={{ padding: "22px 24px 8px", maxWidth: 760, margin: "0 auto", display: "flex", flexDirection: "column", gap: 24 }}>
       <div>
-        <h3 style={{ font: "600 14px/1.3 var(--font-sans)", color: "var(--fg-1)", margin: "0 0 4px" }}>Set access policy for {data.name || "this resource"}</h3>
-        <p style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: 0 }}>Policies control recording, MFA, session timeout, and what users can do during a session.</p>
-        <div className="badge" style={{ marginTop: 10, background: "var(--brand-soft)", color: "var(--brand-fg)", borderColor: "transparent" }}>{policyType} policy</div>
+        <div style={{ font: "600 11px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 14 }}>Resource details</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <Field label="Display name" required>
+            <input className="input" value={data.name} onChange={e => patch("name", e.target.value)} placeholder="e.g. prod-db-primary"/>
+          </Field>
+          <Field label="Type" required>
+            <Segmented value={data.type} onChange={setType} options={[
+              { value: "server",   label: "Server" },
+              { value: "database", label: "Database" },
+              { value: "web",      label: "Web app" },
+              { value: "cloud",    label: "Cloud" },
+            ]}/>
+          </Field>
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 14 }}>
+            <Field label="Host / endpoint" required>
+              <input className="input" value={data.host} onChange={e => patch("host", e.target.value)} placeholder={TYPE_HOST_PLACEHOLDER[data.type]}/>
+            </Field>
+            <Field label="Port" hint={`Default: ${TYPE_PORT_DEFAULT[data.type]}`}>
+              <input className="input t-mono" type="number" value={data.port} onChange={e => patch("port", +e.target.value)}/>
+            </Field>
+          </div>
+          <Field label="Environment" required>
+            <Segmented value={data.env} onChange={v => patch("env", v)} options={[
+              { value: "production",  label: "Production" },
+              { value: "staging",     label: "Staging" },
+              { value: "development", label: "Development" },
+            ]}/>
+          </Field>
+          <Field label="Criticality" required>
+            <Segmented value={data.criticality} onChange={v => patch("criticality", v)} options={[
+              { value: "critical", label: "Critical" },
+              { value: "high",     label: "High" },
+              { value: "medium",   label: "Medium" },
+              { value: "low",      label: "Low" },
+            ]}/>
+          </Field>
+        </div>
       </div>
 
-      <Segmented value={mode} onChange={setMode}
-        options={[{value:"existing",label:"Use existing policy"},{value:"create",label:"Create policy for this resource"}]}/>
-
-      {mode === "existing" && (
-        <Field label="Select policy">
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {existing.map(p => {
-              const sel = data.policyId === p.id;
-              return (
-                <button key={p.id} type="button" onClick={() => setData(d => ({...d, policyId: p.id, policyName: p.name}))} style={{
-                  display: "flex", alignItems: "center", gap: 12, padding: 12,
-                  border: `1px solid ${sel ? "var(--brand)" : "var(--border)"}`,
-                  background: sel ? "var(--brand-soft)" : "var(--bg-surface)",
-                  borderRadius: 7, cursor: "pointer", textAlign: "left",
-                }}>
-                  <div style={{ width: 14, height: 14, borderRadius: "50%", border: `2px solid ${sel ? "var(--brand)" : "var(--border)"}`, display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
-                    {sel && <div style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--brand)" }}/>}
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ font: "600 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{p.name}</div>
-                    <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-3)", marginTop: 3, display: "flex", gap: 12 }}>
-                      <span>Recording <span style={{ color: p.recording ? "var(--success-fg)" : "var(--fg-4)" }}>● {p.recording ? "On" : "Off"}</span></span>
-                      <span>MFA <span style={{ color: p.jit ? "var(--success-fg)" : "var(--fg-4)" }}>● {p.jit ? "On" : "Off"}</span></span>
-                      <span>Updated {p.updated}</span>
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </Field>
-      )}
-
-      {mode === "create" && <>
-        <Field label="Policy name" required>
-          <input className="input" value={data.newPolicyName || ""} onChange={e => setData(d => ({...d, newPolicyName: e.target.value}))} placeholder={`${data.name || "resource"} policy`}/>
-        </Field>
-        <Field label="Idle timeout" required>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input className="input t-mono" type="number" defaultValue={15} style={{ width: 100 }}/>
-            <Select value="minutes" onChange={() => {}} options={[["minutes","Minutes"],["hours","Hours"]]}/>
-          </div>
-        </Field>
-        <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingTop: 4 }}>
-          <Toggle value={data.recording !== false} onChange={v => setData(d => ({...d, recording: v}))} label="Session recording" hint="Record all sessions on this resource"/>
-          <Toggle value={!!data.mfaEnforce} onChange={v => setData(d => ({...d, mfaEnforce: v}))} label="Enforce MFA before session" hint="Require MFA verification before connecting"/>
-          <Toggle value={data.audit !== false} onChange={v => setData(d => ({...d, audit: v}))} label="Audit events" hint="Log all commands and actions"/>
+      <div>
+        <div style={{ font: "600 11px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 12 }}>Root credential</div>
+        <HelperCallout>
+          <strong>This is the only credential you need to provide manually.</strong> PAM will configure rotation, admin account mapping, and access level from this in the next step.
+        </HelperCallout>
+        <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 14 }}>
+          <Field label="Root / admin username" required>
+            <input className="input t-mono" value={data.rootUsername} onChange={e => patch("rootUsername", e.target.value)} placeholder="root · postgres · Administrator"/>
+          </Field>
+          <Field label="Credential type">
+            <Segmented value={data.rootCredType} onChange={v => patch("rootCredType", v)} options={[
+              { value: "password", label: "Password" },
+              { value: "sshkey",   label: "SSH Key" },
+            ]}/>
+          </Field>
+          {data.rootCredType === "password" ? (
+            <Field label="Password" required>
+              <input className="input t-mono" type="password" value={data.rootSecret} onChange={e => patch("rootSecret", e.target.value)} placeholder="Enter password"/>
+            </Field>
+          ) : (
+            <Field label="SSH private key" required hint="Paste PEM-formatted key contents. PAM stores this in the vault immediately.">
+              <textarea className="input t-mono" rows={4} value={data.rootSecret} onChange={e => patch("rootSecret", e.target.value)} placeholder={"-----BEGIN RSA PRIVATE KEY-----\n..."}/>
+            </Field>
+          )}
         </div>
-        <Disclosure label="Advanced settings">
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            <Toggle value={!!data.livestream} onChange={v => setData(d => ({...d, livestream: v}))} label="Livestream" hint="Allow security ops to watch sessions in real time"/>
-            <Toggle value={!!data.sessionShare} onChange={v => setData(d => ({...d, sessionShare: v}))} label="Session share" hint="Let users invite others into the same session"/>
-            <Field label="Command restrictions" hint="One blocked command per line. Useful for SSH/SFTP policies.">
-              <textarea className="input t-mono" rows={3} placeholder={"rm -rf /\nshutdown\ndd if=…"}/></Field>
-          </div>
-        </Disclosure>
-      </>}
+      </div>
     </div>
   );
 };
 
-// ---- Step 4: access ----
-const Step4Access = ({ data, setData }) => {
-  const [open, setOpen] = React.useState(data.allocations.length === 0);
-  const [draft, setDraft] = React.useState({ subject: "", credId: "", window: "lifelong", from: "", to: "" });
+// ─── Step 2 · Review PAM configuration ──────────────────────────────────────
+const NewStep2ReviewConfig = ({ data, setData }) => {
+  const patch = (key, val) => setData(d => ({ ...d, [key]: val }));
+  const [expanded, setExpanded] = React.useState(null);
+  const currentRotation = ADD_ROTATION_POLICIES.find(p => p.id === data.rotationPolicyId) || ADD_ROTATION_POLICIES[0];
+  const currentRecon = RECON_ACCOUNTS.find(a => a.id === data.reconciliationAccountId) || RECON_ACCOUNTS[0];
 
-  const credOptions = data.creds.map(c => [c.id, c.name]);
-  const subjectOptions = [
-    ["devops",     "DevOps team (group)"],
-    ["sre",        "Site reliability engineers (group)"],
-    ["priya",      "Priya Iyer (user)"],
-    ["marcus",     "Marcus Chen (user)"],
-    ["dba-lead",   "Database lead (role)"],
-  ];
+  const ConfigCard = ({ id, icon, title, subtitle, children }) => (
+    <div className="card" style={{ padding: 16 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 10, minWidth: 0, flex: 1 }}>
+          <div style={{ width: 26, height: 26, borderRadius: 6, background: "var(--brand-soft)", color: "var(--brand-fg)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
+            <Icon name={icon} size={13}/>
+          </div>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ font: "600 13.5px/1.35 var(--font-sans)", color: "var(--fg-1)" }}>{title}</div>
+            {subtitle && <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 3 }}>{subtitle}</div>}
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "none" }}>
+          <PamSuggestedTag/>
+          <button className="btn btn-sm btn-ghost" onClick={() => setExpanded(expanded === id ? null : id)}>
+            {expanded === id ? "Close" : "Edit"}
+          </button>
+        </div>
+      </div>
+      {expanded === id && (
+        <div style={{ marginTop: 14, borderTop: "1px solid var(--border-subtle)", paddingTop: 14 }}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
 
-  const add = () => {
-    if (!draft.subject) return;
-    const subjLabel = subjectOptions.find(s => s[0] === draft.subject)?.[1] || draft.subject;
-    const credLabel = credOptions.find(c => c[0] === draft.credId)?.[1] || "—";
-    setData(d => ({...d, allocations: [...d.allocations, { ...draft, id: `alloc-${Date.now()}`, subjLabel, credLabel }]}));
-    setDraft({ subject: "", credId: "", window: "lifelong", from: "", to: "" });
-    setOpen(false);
+  const RadioRow = ({ selected, primary, secondary, onClick }) => (
+    <button onClick={onClick} style={{
+      padding: 10, border: `1px solid ${selected ? "var(--brand)" : "var(--border)"}`,
+      background: selected ? "var(--brand-soft)" : "var(--bg-app)",
+      borderRadius: 6, cursor: "pointer", textAlign: "left",
+      display: "flex", alignItems: "center", gap: 10, width: "100%",
+    }}>
+      <span style={{ width: 12, height: 12, borderRadius: "50%", border: `2px solid ${selected ? "var(--brand)" : "var(--border-strong)"}`, display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
+        {selected && <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--brand)" }}/>}
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{primary}</div>
+        {secondary && <div style={{ font: "400 11.5px/1.3 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>{secondary}</div>}
+      </div>
+    </button>
+  );
+
+  return (
+    <div style={{ padding: "22px 24px", maxWidth: 760, margin: "0 auto", display: "flex", flexDirection: "column", gap: 14 }}>
+      <div>
+        <div style={{ font: "600 14px/1.3 var(--font-sans)", color: "var(--fg-1)", marginBottom: 4 }}>Here's what PAM will configure</div>
+        <div style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>
+          Based on the resource type and root credential you provided. Review and override anything below — nothing here requires your input unless you want to change it.
+        </div>
+      </div>
+
+      <ConfigCard
+        id="rotation" icon="rotate-cw"
+        title={`${currentRotation.name} — ${currentRotation.detail}`}
+        subtitle={rotationReason(data.env, data.criticality, data.rotationPolicyId)}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {ADD_ROTATION_POLICIES.map(p => (
+            <RadioRow key={p.id} selected={p.id === data.rotationPolicyId}
+              primary={`${p.name} · ${p.detail}`} secondary={p.scopeSummary}
+              onClick={() => { patch("rotationPolicyId", p.id); setExpanded(null); }}/>
+          ))}
+        </div>
+      </ConfigCard>
+
+      <ConfigCard
+        id="local" icon="user-plus"
+        title={data.localAccountMode === "ephemeral"
+          ? "Local accounts will be created just-in-time and destroyed after each session (ephemeral)."
+          : "Standing local accounts — created once and reused across sessions."}
+        subtitle={data.localAccountMode === "ephemeral"
+          ? "Ephemeral is the recommended default — reduces lateral-movement blast radius."
+          : "Standing accounts persist between sessions. Use only when a target requires it."}
+      >
+        <Toggle
+          value={data.localAccountMode === "standing"}
+          onChange={v => patch("localAccountMode", v ? "standing" : "ephemeral")}
+          label="Allow standing local accounts instead"
+          hint="Opt out of ephemeral mode. Standing accounts persist after the session ends — required only for a small set of targets that reject just-in-time provisioning."
+        />
+      </ConfigCard>
+
+      <ConfigCard
+        id="recon" icon="shield"
+        title={`${currentRecon.name} will handle password rotation for this resource.`}
+        subtitle={`This reconciliation account already ${currentRecon.scope}.`}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {RECON_ACCOUNTS.map(a => (
+            <RadioRow key={a.id} selected={a.id === data.reconciliationAccountId}
+              primary={a.name} secondary={a.scope}
+              onClick={() => { patch("reconciliationAccountId", a.id); setExpanded(null); }}/>
+          ))}
+        </div>
+      </ConfigCard>
+    </div>
+  );
+};
+
+// ─── Step 3 · Confirm ──────────────────────────────────────────────────────
+const NewStep3Confirm = ({ data }) => {
+  const rotation = ADD_ROTATION_POLICIES.find(p => p.id === data.rotationPolicyId) || ADD_ROTATION_POLICIES[0];
+  const recon = RECON_ACCOUNTS.find(a => a.id === data.reconciliationAccountId) || RECON_ACCOUNTS[0];
+  return (
+    <div style={{ padding: "22px 24px", maxWidth: 720, margin: "0 auto", display: "flex", flexDirection: "column", gap: 14 }}>
+      <div>
+        <div style={{ font: "600 14px/1.3 var(--font-sans)", color: "var(--fg-1)", marginBottom: 4 }}>Confirm what's being onboarded</div>
+        <div style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>
+          This is the last step before the resource is live. Nothing is created until you confirm.
+        </div>
+      </div>
+
+      <div className="card" style={{ padding: 20 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "170px 1fr", rowGap: 14, columnGap: 20 }}>
+          <ConfirmRow label="Resource" value={<span><strong style={{ color: "var(--fg-1)" }}>{data.name || "(untitled)"}</strong> · {cap(data.type)} · {cap(data.env)} · {cap(data.criticality)}</span>}/>
+          <ConfirmRow label="Host / port" value={<span className="t-mono" style={{ fontSize: 12.5 }}>{data.host}:{data.port}</span>}/>
+          <ConfirmRow label="Root credential" value={<span>added as <strong>{data.rootUsername}</strong> — non-viewable, stored in the vault</span>}/>
+          <ConfirmRow label="Rotation" value={`${rotation.name} (${rotation.detail})`}/>
+          <ConfirmRow label="Local accounts" value={data.localAccountMode === "ephemeral" ? "Ephemeral — created on access, destroyed after session" : "Standing — persist across sessions"}/>
+          <ConfirmRow label="Reconciliation account" value={recon.name}/>
+          <ConfirmRow label="System users discovered" value={<span style={{ color: "var(--fg-4)" }}>0 — populates after the first discovery scan</span>}/>
+        </div>
+      </div>
+
+      <div style={{ padding: 12, background: "var(--bg-surface-2)", borderRadius: 6, font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)", display: "flex", gap: 8, alignItems: "flex-start" }}>
+        <Icon name="info" size={13} color="var(--fg-4)"/>
+        <div>
+          The resource will appear in the Resources list as <strong style={{ color: "var(--fg-1)" }}>Pending</strong> immediately, and transition to active once the first connection test succeeds.
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const ConfirmRow = ({ label, value }) => <>
+  <div style={{ font: "600 11px/1.3 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>{label}</div>
+  <div style={{ font: "400 13px/1.5 var(--font-sans)", color: "var(--fg-1)" }}>{value}</div>
+</>;
+
+// ─── Bulk import panel ─────────────────────────────────────────────────────
+// Same panel handles the CSV, AD, and (later) network-scan bulk paths — they
+// only differ in the source label and how the candidate list is seeded.
+const BULK_MOCK_DISCOVERED = [
+  { id: "d1", name: "auth-server-01",         type: "server",   host: "auth01.kestrel.internal",    env: "production",  criticality: "critical" },
+  { id: "d2", name: "data-warehouse-bastion", type: "server",   host: "warehouse-bastion.internal", env: "production",  criticality: "high" },
+  { id: "d3", name: "ledger-mongo-cluster",   type: "database", host: "ledger-mongo:27017",         env: "production",  criticality: "high" },
+  { id: "d4", name: "dev-jumpbox",            type: "server",   host: "dev-jumpbox.internal",       env: "development", criticality: "low" },
+];
+
+const BulkImportPanel = ({ source, onClose, onDone }) => {
+  const [phase, setPhase] = React.useState("edit");
+  const [rows, setRows] = React.useState(BULK_MOCK_DISCOVERED.map(r => ({
+    ...r, selected: true, rootUsername: "", rootSecret: "", rootCredType: "password",
+  })));
+  const [shared, setShared] = React.useState({ apply: false, username: "", secret: "", credType: "password" });
+  const [results, setResults] = React.useState([]);
+
+  const setRow = (id, patch) => setRows(rs => rs.map(r => r.id === id ? { ...r, ...patch } : r));
+  const applyShared = () => setRows(rs => rs.map(r => r.selected
+    ? { ...r, rootUsername: shared.username, rootSecret: shared.secret, rootCredType: shared.credType }
+    : r));
+
+  const runOnboarding = (retryOnly) => {
+    const target = retryOnly
+      ? rows.filter(r => r.selected && results.find(x => x.id === r.id && x.status === "failed"))
+      : rows.filter(r => r.selected);
+    setPhase("running");
+    setTimeout(() => {
+      const out = target.map(r => {
+        if (!r.rootUsername || !r.rootSecret)   return { id: r.id, name: r.name, status: "skipped", reason: "no root credential provided" };
+        if (r.name === "ledger-mongo-cluster")   return { id: r.id, name: r.name, status: "failed",  reason: "root credential could not authenticate", retryable: true };
+        return { id: r.id, name: r.name, status: "success" };
+      });
+      setResults(prev => retryOnly ? prev.map(p => out.find(o => o.id === p.id) || p) : out);
+      setPhase("result");
+    }, 900);
   };
 
+  const selectedCount = rows.filter(r => r.selected).length;
+  const failedCount = results.filter(r => r.status === "failed").length;
+  const sourceLabel = source === "csv" ? "CSV" : source === "ad" ? "Active Directory" : "scan";
+
   return (
-    <div style={{ padding: "20px 24px 8px", maxWidth: 720 }}>
-      <h3 style={{ font: "600 14px/1.3 var(--font-sans)", color: "var(--fg-1)", margin: "0 0 4px" }}>Allocate access to {data.name || "this resource"}</h3>
-      <p style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "0 0 18px" }}>Define who can access this resource and for how long.</p>
-
-      {data.allocations.length === 0 ? (
-        <div style={{ padding: 24, border: "1px dashed var(--border)", borderRadius: 8, textAlign: "center", color: "var(--fg-3)", fontSize: 12.5, marginBottom: 14 }}>
-          No one has access yet. Add an allocation below.
-        </div>
-      ) : (
-        <table className="table" style={{ marginBottom: 14, border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
-          <thead><tr><th>Subject</th><th>Credential</th><th>Access window</th><th>Status</th><th></th></tr></thead>
-          <tbody>{data.allocations.map((a, i) => (
-            <tr key={a.id}>
-              <td style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{a.subjLabel}</td>
-              <td className="t-mono" style={{ fontSize: 12, color: "var(--fg-2)" }}>{a.credLabel}</td>
-              <td style={{ fontSize: 12.5, color: "var(--fg-2)", textTransform: "capitalize" }}>{a.window === "custom" ? `${a.from} → ${a.to}` : a.window}</td>
-              <td><span className="badge badge-success">Pending save</span></td>
-              <td style={{ textAlign: "right" }}>
-                <button className="btn btn-ghost btn-sm" onClick={() => setData(d => ({...d, allocations: d.allocations.filter((_,j) => j !== i)}))}>Remove</button>
-              </td>
-            </tr>
-          ))}</tbody>
-        </table>
-      )}
-
-      {!open && <button className="btn btn-sm btn-primary" onClick={() => setOpen(true)}><Icon name="plus" size={11}/> Add allocation</button>}
-
-      {open && (
-        <div style={{ background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
-          <div style={{ font: "600 13px/1 var(--font-sans)", color: "var(--fg-1)" }}>New allocation</div>
-          <Field label="Assign to" required>
-            <Select value={draft.subject} onChange={v => setDraft(d => ({...d, subject: v}))} options={[["","Search users, groups, or roles…"], ...subjectOptions]}/>
-          </Field>
-          <Field label="Credential" hint="Pick which vaulted credential this subject will use">
-            <Select value={draft.credId} onChange={v => setDraft(d => ({...d, credId: v}))} options={[["","Use any attached credential"], ...credOptions]}/>
-          </Field>
-          <Field label="Access window">
-            <Segmented value={draft.window} onChange={v => setDraft(d => ({...d, window: v}))}
-              options={[
-                {value:"custom",label:"Custom"},
-                {value:"zeroday",label:"Zero day"},
-                {value:"lifelong",label:"Lifelong"},
-                {value:"onetime",label:"One time"},
-                {value:"hours",label:"Working hours"},
-              ]}/>
-          </Field>
-          {draft.window === "custom" && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              <Field label="From"><input className="input" type="datetime-local" value={draft.from} onChange={e => setDraft(d => ({...d, from: e.target.value}))}/></Field>
-              <Field label="To"><input className="input" type="datetime-local" value={draft.to} onChange={e => setDraft(d => ({...d, to: e.target.value}))}/></Field>
+    <Panel
+      title={`Bulk onboard — ${sourceLabel}`}
+      onClose={onClose}
+      footer={phase === "edit" ? (
+        <>
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <div style={{ flex: 1 }}/>
+          <span className="t-tiny" style={{ color: "var(--fg-4)", fontWeight: 400 }}>{selectedCount} of {rows.length} selected</span>
+          <button className="btn btn-primary" disabled={selectedCount === 0} onClick={() => runOnboarding(false)} style={{ opacity: selectedCount ? 1 : 0.5 }}>
+            Onboard selected ({selectedCount})
+          </button>
+        </>
+      ) : phase === "result" ? (
+        <>
+          {failedCount > 0 && <button className="btn" onClick={() => runOnboarding(true)}><Icon name="rotate-cw" size={12}/> Retry failed ({failedCount})</button>}
+          <div style={{ flex: 1 }}/>
+          <button className="btn btn-primary" onClick={() => onDone(results.filter(r => r.status === "success").length)}>Done</button>
+        </>
+      ) : null}
+    >
+      {phase === "edit" && (
+        <div style={{ padding: 20 }}>
+          <div style={{ maxWidth: 940, margin: "0 auto" }}>
+            <div style={{ marginBottom: 14, font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>
+              {sourceLabel === "CSV"
+                ? "Preview of resources parsed from your CSV. Review each row, edit its criticality if needed, and provide a root credential."
+                : "Discovered from " + sourceLabel + ". Review each row, edit its criticality if needed, and provide a root credential."}
+              {" "}Each row is onboarded through the same PAM-inferred configuration path as a single-resource add — you only supply the root credential here.
             </div>
-          )}
-          {draft.window === "zeroday" && <div style={{ padding: 10, background: "var(--warning-soft)", color: "var(--warning-fg)", fontSize: 12, borderRadius: 6 }}>User must raise a ticket for each access event. No standing access.</div>}
-          {draft.window === "hours" && <div style={{ padding: 10, background: "var(--bg-surface-2)", color: "var(--fg-3)", fontSize: 12, borderRadius: 6 }}>Default: Mon–Fri, 09:00–18:00 (configurable in policy). Timezone: org default.</div>}
-          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-            <button className="btn btn-sm btn-ghost" onClick={() => setOpen(false)}>Cancel</button>
-            <button className="btn btn-sm btn-primary" onClick={add}>Add</button>
+
+            <div className="card" style={{ padding: 14, marginBottom: 14 }}>
+              <Toggle
+                value={shared.apply}
+                onChange={v => setShared(s => ({ ...s, apply: v }))}
+                label="Apply the same root credential to all selected rows"
+                hint="Useful when every discovered target uses a shared bastion account. You can still override any row individually below."
+              />
+              {shared.apply && (
+                <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1fr 1fr 190px auto", gap: 10, alignItems: "flex-end" }}>
+                  <Field label="Root username"><input className="input t-mono" value={shared.username} onChange={e => setShared(s => ({ ...s, username: e.target.value }))} placeholder="root"/></Field>
+                  <Field label={shared.credType === "sshkey" ? "SSH key (paste)" : "Password"}>
+                    <input className="input t-mono" type={shared.credType === "sshkey" ? "text" : "password"} value={shared.secret} onChange={e => setShared(s => ({ ...s, secret: e.target.value }))} placeholder={shared.credType === "sshkey" ? "-----BEGIN…" : "Enter password"}/>
+                  </Field>
+                  <Field label="Type">
+                    <Segmented value={shared.credType} onChange={v => setShared(s => ({ ...s, credType: v }))} options={[
+                      { value: "password", label: "Password" },
+                      { value: "sshkey",   label: "SSH Key" },
+                    ]}/>
+                  </Field>
+                  <button className="btn" onClick={applyShared} disabled={!shared.username || !shared.secret}>Apply to {selectedCount}</button>
+                </div>
+              )}
+            </div>
+
+            <div className="card">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th style={{ width: 32 }}><input type="checkbox" checked={rows.length > 0 && rows.every(r => r.selected)} onChange={e => setRows(rs => rs.map(r => ({ ...r, selected: e.target.checked })))}/></th>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Host</th>
+                    <th>Environment</th>
+                    <th style={{ width: 120 }}>Criticality</th>
+                    <th>Root username</th>
+                    <th>Secret</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map(r => (
+                    <tr key={r.id} style={{ opacity: r.selected ? 1 : 0.5 }}>
+                      <td><input type="checkbox" checked={r.selected} onChange={e => setRow(r.id, { selected: e.target.checked })}/></td>
+                      <td><span style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{r.name}</span></td>
+                      <td><span className="badge">{cap(r.type)}</span></td>
+                      <td className="t-mono" style={{ fontSize: 12, color: "var(--fg-3)" }}>{r.host}</td>
+                      <td><span className="badge">{cap(r.env)}</span></td>
+                      <td>
+                        <select className="input" style={{ height: 30, padding: "0 8px", font: "400 12.5px/1 var(--font-sans)" }} value={r.criticality} onChange={e => setRow(r.id, { criticality: e.target.value })}>
+                          <option value="critical">Critical</option>
+                          <option value="high">High</option>
+                          <option value="medium">Medium</option>
+                          <option value="low">Low</option>
+                        </select>
+                      </td>
+                      <td><input className="input t-mono" style={{ height: 30, fontSize: 12 }} value={r.rootUsername} onChange={e => setRow(r.id, { rootUsername: e.target.value })} placeholder="root"/></td>
+                      <td><input className="input t-mono" style={{ height: 30, fontSize: 12 }} type="password" value={r.rootSecret} onChange={e => setRow(r.id, { rootSecret: e.target.value })} placeholder="…"/></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
-    </div>
-  );
-};
 
-// ---- Step 5: success ----
-const Step5Success = ({ data, onView, onAnother, onClose }) => {
-  const summary = [
-    { ok: !!data.name, label: data.name ? `Basic info saved` : "Basic info incomplete",
-      sub: `${data.type[0].toUpperCase()+data.type.slice(1)} · ${data.host || "—"} · ${data.env || "production"} · ${data.criticality || "medium"}` },
-    { ok: data.creds.length > 0, label: data.creds.length > 0 ? `${data.creds.length} credential${data.creds.length>1?"s":""} attached` : "No credentials attached",
-      sub: data.creds.length > 0 ? data.creds.map(c => c.name).join(", ") : "Add credentials" },
-    { ok: !!data.policyId || !!data.newPolicyName, label: data.policyId || data.newPolicyName ? `Policy applied` : "No policy assigned",
-      sub: data.policyId ? `${data.policyName} · Recording ${data.recording !== false ? "ON" : "OFF"}` : data.newPolicyName ? `${data.newPolicyName} (new) · Recording ${data.recording !== false ? "ON" : "OFF"}` : "Set policy" },
-    { ok: data.allocations.length > 0, label: data.allocations.length > 0 ? `${data.allocations.length} allocation${data.allocations.length>1?"s":""} created` : "No allocations created",
-      sub: data.allocations.length > 0 ? data.allocations.map(a => a.subjLabel).join(", ") : "Add an allocation" },
-  ];
-  return (
-    <div style={{ padding: "32px 24px", maxWidth: 580, margin: "0 auto", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center" }}>
-      <div style={{ width: 64, height: 64, borderRadius: "50%", background: "var(--success-soft)", color: "var(--success-fg)", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 16 }}>
-        <Icon name="check-circle" size={32}/>
-      </div>
-      <h2 style={{ font: "600 20px/1.2 var(--font-sans)", color: "var(--fg-1)", margin: "0 0 6px" }}>{data.name || "Resource"} is ready</h2>
-      <p style={{ font: "400 13px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "0 0 20px" }}>You can edit any of these later from the resource detail page.</p>
+      {phase === "running" && (
+        <div style={{ padding: 60, textAlign: "center" }}>
+          <Icon name="rotate-cw" size={32} color="var(--brand-fg)"/>
+          <div style={{ marginTop: 14, font: "500 14px/1.4 var(--font-sans)", color: "var(--fg-2)" }}>Onboarding {selectedCount} resources…</div>
+          <div style={{ marginTop: 6, font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-4)" }}>PAM is applying inferred rotation policies, reconciliation accounts, and local-account handling per row.</div>
+        </div>
+      )}
 
-      <div style={{ background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 14, width: "100%", display: "flex", flexDirection: "column", gap: 10, marginBottom: 22 }}>
-        {summary.map((s, i) => (
-          <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start", textAlign: "left" }}>
-            <Icon name={s.ok ? "check-circle" : "alert-circle"} size={15} color={s.ok ? "var(--success-fg)" : "var(--warning-fg)"} style={{ flex: "none", marginTop: 1 }}/>
-            <div style={{ flex: 1 }}>
-              <div style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{s.label}</div>
-              <div style={{ font: "400 12px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>{s.sub}</div>
+      {phase === "result" && (
+        <div style={{ padding: 20 }}>
+          <div style={{ maxWidth: 720, margin: "0 auto" }}>
+            <div style={{ marginBottom: 14, font: "400 13px/1.5 var(--font-sans)", color: "var(--fg-2)" }}>
+              <strong>{results.filter(r => r.status === "success").length}</strong> onboarded ·
+              {" "}<strong style={{ color: failedCount ? "var(--danger-fg)" : "inherit" }}>{failedCount}</strong> failed ·
+              {" "}<strong>{results.filter(r => r.status === "skipped").length}</strong> skipped
+            </div>
+            <div className="card">
+              <table className="table">
+                <thead><tr><th style={{ width: 32 }}></th><th>Resource</th><th>Outcome</th><th style={{ textAlign: "right" }}></th></tr></thead>
+                <tbody>
+                  {results.map(r => (
+                    <tr key={r.id}>
+                      <td>
+                        {r.status === "success" && <Icon name="check-circle" size={15} color="var(--success-fg)"/>}
+                        {r.status === "failed"  && <Icon name="alert-circle" size={15} color="var(--danger-fg)"/>}
+                        {r.status === "skipped" && <Icon name="circle" size={15} color="var(--fg-4)"/>}
+                      </td>
+                      <td><span style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{r.name}</span></td>
+                      <td style={{ font: "400 12.5px/1.4 var(--font-sans)", color: r.status === "failed" ? "var(--danger-fg)" : r.status === "success" ? "var(--success-fg)" : "var(--fg-4)" }}>
+                        {r.status === "success" && "Onboarded successfully"}
+                        {r.status === "failed"  && `Failed: ${r.reason}`}
+                        {r.status === "skipped" && `Skipped: ${r.reason}`}
+                      </td>
+                      <td style={{ textAlign: "right" }}>
+                        {r.status === "failed" && <button className="btn btn-sm">Edit credential</button>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
-        ))}
-      </div>
-
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
-        <button className="btn btn-primary" onClick={onView}>View resource</button>
-        <button className="btn" onClick={onAnother}>Add another resource</button>
-        <button className="btn btn-ghost" onClick={onClose}>Go to Resources list</button>
-      </div>
-    </div>
+        </div>
+      )}
+    </Panel>
   );
 };
 
-// ---- Main host ----
-const ResourceAddPanel = ({ onClose, onCreated }) => {
-  const [method, setMethod] = React.useState(null); // null | "manual" | "scan" | "ad" | "csv"
+// ─── Manual add — 3-step wizard ────────────────────────────────────────────
+const NewManualAdd = ({ onClose, onCreated }) => {
   const [step, setStep] = React.useState(1);
   const [data, setData] = React.useState({
-    type: "server", name: "", host: "", port: 22, os: "linux",
-    criticality: "medium", env: "production",
-    creds: [], reconCred: null, allocations: [],
-    recording: true, audit: true,
+    name: "", type: "server", host: "", port: 22,
+    env: "production", criticality: "medium",
+    rootUsername: "", rootSecret: "", rootCredType: "password",
+    rotationPolicyId: "prod-daily",
+    localAccountMode: "ephemeral",
+    reconciliationAccountId: "backup-reconciliation-01",
   });
+  // If the admin hasn't touched Step 2, keep the PAM-suggested picks in sync
+  // with env/criticality. Once they touch Step 2, freeze — the admin has
+  // overridden and we shouldn't clobber their choice on the way back to Step 1.
+  const [pamOverridden, setPamOverridden] = React.useState(false);
+  React.useEffect(() => {
+    if (pamOverridden) return;
+    setData(d => ({
+      ...d,
+      rotationPolicyId: pickRotationPolicy(d.env, d.criticality),
+      reconciliationAccountId: pickReconAccount(d.env),
+    }));
+  }, [data.env, data.criticality, pamOverridden]);
 
-  const valid = step === 1 ? !!(data.name && data.host) : true;
+  const stepMeta = [
+    { n: 1, label: "Resource & root" },
+    { n: 2, label: "Review PAM configuration" },
+    { n: 3, label: "Confirm" },
+  ];
+  const step1Valid = data.name && data.host && data.rootUsername && data.rootSecret;
+  const canProceed = step === 1 ? step1Valid : true;
+
+  const confirmClose = () => {
+    const hasInput = data.name || data.host || data.rootUsername || data.rootSecret;
+    if (hasInput && !confirm("Discard this resource? Nothing has been saved yet.")) return;
+    onClose();
+  };
+
+  return (
+    <Panel title="Add resource" onClose={confirmClose} back={step > 1 ? () => setStep(step - 1) : null}>
+      <StepIndicator step={step} steps={stepMeta}/>
+      {step === 1 && <NewStep1RootCred data={data} setData={setData}/>}
+      {step === 2 && <NewStep2ReviewConfig data={data} setData={(fnOrObj) => { setPamOverridden(true); setData(fnOrObj); }}/>}
+      {step === 3 && <NewStep3Confirm data={data}/>}
+      <div style={{ borderTop: "1px solid var(--border)", padding: "12px 24px", display: "flex", alignItems: "center", gap: 10, background: "var(--bg-surface)", flex: "none" }}>
+        <button className="btn btn-ghost" onClick={confirmClose}>Cancel</button>
+        <div style={{ flex: 1 }}/>
+        {step > 1 && <button className="btn" onClick={() => setStep(step - 1)}>← Back</button>}
+        {step < 3 && <button className="btn btn-primary" disabled={!canProceed} onClick={() => setStep(step + 1)} style={{ opacity: canProceed ? 1 : 0.5 }}>Next →</button>}
+        {step === 3 && <button className="btn btn-primary" onClick={() => onCreated({ ...data, status: "pending" })}>
+          <Icon name="check" size={12} color="#fff"/> Confirm and create resource
+        </button>}
+      </div>
+    </Panel>
+  );
+};
+
+// ─── Main dispatcher — Entry method → manual / bulk / discovery landings ──
+const ResourceAddPanel = ({ onClose, onCreated }) => {
+  const [method, setMethod] = React.useState(null);
 
   if (!method) {
     return <Panel title="Add resource" onClose={onClose}>
@@ -731,6 +758,10 @@ const ResourceAddPanel = ({ onClose, onCreated }) => {
       </div>
     </Panel>;
   }
+
+  if (method === "manual") return <NewManualAdd onClose={onClose} onCreated={onCreated}/>;
+  if (method === "csv")    return <BulkImportPanel source="csv" onClose={onClose} onDone={n => onCreated({ bulk: true, count: n })}/>;
+  if (method === "ad")     return <BulkImportPanel source="ad"  onClose={onClose} onDone={n => onCreated({ bulk: true, count: n })}/>;
 
   if (method === "cloud") {
     return <Panel title="Cloud discovery" onClose={onClose} back={() => setMethod(null)}>
@@ -803,75 +834,9 @@ const ResourceAddPanel = ({ onClose, onCreated }) => {
     </Panel>;
   }
 
-  if (method === "csv") {
-    return <Panel title="Bulk import via CSV" onClose={onClose} back={() => setMethod(null)}>
-      <div style={{ padding: 32, maxWidth: 560, margin: "0 auto" }}>
-        <div style={{ border: "2px dashed var(--border)", borderRadius: 10, padding: 40, textAlign: "center", background: "var(--bg-surface)" }}>
-          <Icon name="upload" size={32} color="var(--fg-4)"/>
-          <div style={{ marginTop: 12, font: "500 14px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>Drop CSV file here</div>
-          <div style={{ marginTop: 4, font: "400 12px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>or</div>
-          <button className="btn btn-primary" style={{ marginTop: 12 }}>Choose file</button>
-        </div>
-        <div style={{ marginTop: 14, fontSize: 12.5, color: "var(--fg-3)" }}>
-          Need the format? <a href="#" style={{ color: "var(--brand-fg)" }}>Download template (CSV)</a>
-        </div>
-      </div>
-    </Panel>;
-  }
-
-  if (method === "ad") {
-    return <Panel title="Import from Active Directory" onClose={onClose} back={() => setMethod(null)}>
-      <div style={{ padding: 32, maxWidth: 560, margin: "0 auto" }}>
-        <div style={{ background: "var(--success-soft)", border: "1px solid transparent", borderRadius: 8, padding: 14, marginBottom: 20, display: "flex", gap: 10, alignItems: "flex-start" }}>
-          <Icon name="check-circle" size={15} color="var(--success-fg)" style={{ marginTop: 1 }}/>
-          <div>
-            <div style={{ font: "600 13px/1.3 var(--font-sans)", color: "var(--success-fg)" }}>Connected to kestrel.internal</div>
-            <div style={{ font: "400 12px/1.4 var(--font-sans)", color: "var(--success-fg)", opacity: 0.85, marginTop: 2 }}>Last synced 3 minutes ago · 2,847 machine accounts available</div>
-          </div>
-        </div>
-        <Field label="Organizational unit (OU)">
-          <Select value="all" onChange={() => {}} options={[["all","All machines (2,847)"],["servers","CN=Servers (412)"],["workstations","CN=Workstations (2,401)"],["dmz","OU=DMZ (34)"]]}/>
-        </Field>
-        <div style={{ display: "flex", gap: 8, marginTop: 18, justifyContent: "flex-end" }}>
-          <button className="btn btn-ghost" onClick={() => setMethod(null)}>Back</button>
-          <button className="btn btn-primary">Import 412 machines</button>
-        </div>
-      </div>
-    </Panel>;
-  }
-
-  // Manual flow
-  return <Panel
-    title={step === 5 ? "Resource ready" : `Add resource — ${data.name || "untitled"}`}
-    onClose={onClose}
-    back={step > 1 && step < 5 ? () => setStep(step - 1) : (step === 1 ? () => setMethod(null) : null)}
-  >
-    {step <= 4 && <StepIndicator step={step}/>}
-    {step === 1 && <Step1Basic data={data} setData={setData}/>}
-    {step === 2 && <Step2Creds data={data} setData={setData}/>}
-    {step === 3 && <Step3Policy data={data} setData={setData}/>}
-    {step === 4 && <Step4Access data={data} setData={setData}/>}
-    {step === 5 && <Step5Success data={data}
-      onView={() => onCreated(data)}
-      onAnother={() => { setData({ type: "server", name: "", host: "", port: 22, os: "linux", criticality: "medium", env: "production", creds: [], reconCred: null, allocations: [], recording: true, audit: true }); setStep(1); }}
-      onClose={onClose}
-    />}
-
-    {step <= 4 && <div style={{ borderTop: "1px solid var(--border)", padding: "12px 24px", display: "flex", alignItems: "center", gap: 10, background: "var(--bg-surface)" }}>
-      <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-      <div style={{ flex: 1 }}/>
-      {step > 1 && step < 4 && <button className="btn btn-ghost" onClick={() => setStep(step + 1)}>Skip for now</button>}
-      {step > 1 && <button className="btn" onClick={() => setStep(step - 1)}>Back</button>}
-      <button className="btn btn-primary" disabled={!valid} onClick={() => setStep(step + 1)} style={{ opacity: valid ? 1 : 0.5 }}>
-        {step === 1 ? "Save & continue to credentials"
-        : step === 2 ? "Save & continue to policy"
-        : step === 3 ? "Save & continue to access"
-        : "Save & finish"}
-      </button>
-    </div>}
-  </Panel>;
+  return null;
 };
 
 Object.assign(window, {
-  ResourceAddPanel, Panel, Field, Pill, Segmented, Toggle, Select, Disclosure, StepIndicator,
+  ResourceAddPanel, Panel, Field, Pill, Segmented, Toggle, Select, Disclosure, StepIndicator, PamSuggestedTag,
 });
