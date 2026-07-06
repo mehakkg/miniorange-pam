@@ -3,7 +3,7 @@
 const CredentialsV2 = ({ empty }) => {
   const [tab, setTab] = React.useState("all");
   const [q, setQ] = React.useState("");
-  const [filters, setFilters] = React.useState({ type: "Any", status: "Any", resource: "Any", tag: "Any", owner: "Any" });
+  const [filters, setFilters] = React.useState({ nature: "Any", ownership: "Any", mgmt: "Any", status: "Any", resource: "Any", owner: "Any" });
   const [selected, setSelected] = React.useState(new Set());
   const [openId, setOpenId] = React.useState(null);
   const [showAdd, setShowAdd] = React.useState(false);
@@ -55,7 +55,35 @@ const CredentialsV2 = ({ empty }) => {
   const all = empty ? [] : liveCreds;
   let rows = all;
   if (q) { const lq = q.toLowerCase(); rows = rows.filter(c => [c.display, c.username, c.owner || "", ...c.tags].some(v => String(v).toLowerCase().includes(lq))); }
-  if (filters.type !== "Any")        rows = rows.filter(c => c.type === filters.type);
+  // Nature — cred kind. Password / SSH Key / App Secret map to existing type field.
+  // Cloud-IAM = credentials tagged aws-*, azure-*, gcp-* or ending in -iam.
+  // Certificate reference = tags include "cert" or type === "Certificate".
+  const natureOf = (c) => {
+    if (c.type === "SSH Key") return "SSH Key";
+    if (c.type === "App Secret") return "App Secret";
+    if (c.type === "Certificate" || (c.tags || []).includes("cert")) return "Certificate reference";
+    if (/^(aws|azure|gcp)-/i.test(c.display || "") || (c.tags || []).includes("cloud-iam")) return "Cloud-IAM";
+    return "Password";
+  };
+  // Ownership — Individual = has a human owner. Non-human = service account
+  // display starting with svc- / bot- / integration name. Shared = no owner
+  // assigned OR generic name like root-*.
+  const ownershipOf = (c) => {
+    if (/^(svc|bot|integration)-/i.test(c.display || "")) return "Non-human";
+    if (!c.owner || /^root/i.test(c.display || "")) return "Shared";
+    return "Individual";
+  };
+  // Management state — how PAM handles the cred lifecycle.
+  const mgmtOf = (c) => {
+    if ((c.tags || []).includes("break-glass")) return "Break-glass";
+    if ((c.tags || []).includes("reconciliation") || /reconciliation/i.test(c.display || "")) return "Reconciliation";
+    if ((c.tags || []).includes("federated-sso") || c.login === "SSO") return "Federated-SSO";
+    if (c.rotation === "no-policy" || !c.policy) return "Ad-hoc-Unmanaged";
+    return "Vaulted-Managed";
+  };
+  if (filters.nature !== "Any")     rows = rows.filter(c => natureOf(c) === filters.nature);
+  if (filters.ownership !== "Any")  rows = rows.filter(c => ownershipOf(c) === filters.ownership);
+  if (filters.mgmt !== "Any")       rows = rows.filter(c => mgmtOf(c) === filters.mgmt);
   if (filters.status === "Healthy")  rows = rows.filter(c => c.rotation === "healthy");
   if (filters.status === "Overdue")  rows = rows.filter(c => c.rotation === "overdue");
   if (filters.status === "Failed")   rows = rows.filter(c => c.rotation === "failed");
@@ -103,19 +131,23 @@ const CredentialsV2 = ({ empty }) => {
         active={tab}
         onChange={setTab}
         tabs={[
-          { id: "all",    label: "All credentials",    weight: 1 },
-          { id: "ssh",    label: "SSH Keys",           weight: 2 },
-          { id: "secret", label: "Application Secrets",weight: 2 },
-          { id: "recon",  label: "Reconciliation",     weight: 2 },
+          { id: "all",      label: "All credentials",      weight: 1 },
+          { id: "ssh",      label: "SSH Keys",             weight: 2 },
+          { id: "secret",   label: "Application Secrets",  weight: 2 },
+          { id: "cloudiam", label: "Cloud/IAM Accounts",   weight: 2 },
+          { id: "recon",    label: "Reconciliation",       weight: 2 },
+          { id: "bg",       label: "Break-glass",          weight: 2 },
           { separator: true },
-          { id: "health", label: "Health",             weight: 3 },
+          { id: "health",   label: "Health",               weight: 3 },
         ]}
       />
 
-      {tab === "ssh"    && <SSHKeysTab onOpen={setOpenId} onAdd={() => setShowAdd(true)}/>}
-      {tab === "secret" && <AppSecretsTab onOpen={setOpenId} onAdd={() => setShowAdd(true)}/>}
-      {tab === "recon"  && <ReconciliationTab/>}
-      {tab === "health" && <RotationHealthTab/>}
+      {tab === "ssh"      && <SSHKeysTab onOpen={setOpenId} onAdd={() => setShowAdd(true)}/>}
+      {tab === "secret"   && <AppSecretsTab onOpen={setOpenId} onAdd={() => setShowAdd(true)}/>}
+      {tab === "cloudiam" && <CloudIAMTab onAdd={() => setShowAdd(true)}/>}
+      {tab === "recon"    && <ReconciliationTab/>}
+      {tab === "bg"       && <BreakGlassCredsTab/>}
+      {tab === "health"   && <RotationHealthTab/>}
 
       {tab === "all" && (
         <>
@@ -134,11 +166,12 @@ const CredentialsV2 = ({ empty }) => {
               <Icon name="search" size={13} color="var(--fg-4)" style={{ position: "absolute", left: 10, top: 11 }}/>
               <input className="input" value={q} onChange={e => setQ(e.target.value)} placeholder="Search credentials…" style={{ paddingLeft: 30, height: 32, fontSize: 12.5 }}/>
             </div>
-            <FilterDropdown label="Type"        value={filters.type}     onChange={v => setFilters({...filters, type: v})}        options={[["Any","Any"],["Password","Password"],["SSH Key","SSH Key"],["App Secret","App Secret"]]}/>
-            <FilterDropdown label="Status"      value={filters.status}   onChange={v => setFilters({...filters, status: v})}      options={[["Any","Any"],["Healthy","Healthy"],["Overdue","Overdue"],["Failed","Failed"],["Drifted","Drifted"],["No policy","No policy"]]}/>
-            <FilterDropdown label="Resource"    value={filters.resource} onChange={v => setFilters({...filters, resource: v})}    options={[["Any","Any"],["prod-db-01","prod-db-01"],["ssh-server-linux","ssh-server-linux"]]}/>
-            <FilterDropdown label="Tag"         value={filters.tag}      onChange={v => setFilters({...filters, tag: v})}         options={[["Any","Any"],["production","production"],["database","database"]]}/>
-            <FilterDropdown label="Owner"       value={filters.owner}    onChange={v => setFilters({...filters, owner: v})}       options={[["Any","Any"],["Arjun Bansal","Arjun Bansal"],["Priya Nair","Priya Nair"]]}/>
+            <FilterDropdown label="Nature"           value={filters.nature}    onChange={v => setFilters({...filters, nature: v})}    options={[["Any","Any"],["Password","Password"],["SSH Key","SSH Key"],["App Secret","App Secret"],["Cloud-IAM","Cloud-IAM"],["Certificate reference","Certificate"]]}/>
+            <FilterDropdown label="Ownership"        value={filters.ownership} onChange={v => setFilters({...filters, ownership: v})} options={[["Any","Any"],["Individual","Individual"],["Shared","Shared"],["Non-human","Non-human"]]}/>
+            <FilterDropdown label="Management state" value={filters.mgmt}      onChange={v => setFilters({...filters, mgmt: v})}      options={[["Any","Any"],["Vaulted-Managed","Vaulted-Managed"],["Ad-hoc-Unmanaged","Ad-hoc-Unmanaged"],["Federated-SSO","Federated-SSO"],["Reconciliation","Reconciliation"],["Break-glass","Break-glass"]]}/>
+            <FilterDropdown label="Status"           value={filters.status}    onChange={v => setFilters({...filters, status: v})}    options={[["Any","Any"],["Healthy","Healthy"],["Overdue","Overdue"],["Failed","Failed"],["Drifted","Drifted"],["No policy","No policy"]]}/>
+            <FilterDropdown label="Resource"         value={filters.resource}  onChange={v => setFilters({...filters, resource: v})}  options={[["Any","Any"],["prod-db-01","prod-db-01"],["ssh-server-linux","ssh-server-linux"]]}/>
+            <FilterDropdown label="Owner"            value={filters.owner}     onChange={v => setFilters({...filters, owner: v})}     options={[["Any","Any"],["Arjun Bansal","Arjun Bansal"],["Priya Nair","Priya Nair"]]}/>
             <div style={{ flex: 1 }}/>
             <button className="btn btn-sm" onClick={() => selected.size > 0 ? setBulkRotate(true) : window.pamToast("Select one or more credentials to bulk rotate", "info")}><Icon name="refresh" size={11}/> Bulk rotate</button>
             <div style={{ position: "relative" }}>
@@ -175,7 +208,7 @@ const CredentialsV2 = ({ empty }) => {
           {activeChips.length > 0 && (
             <div style={{ padding: "8px 24px", borderBottom: "1px solid var(--border-subtle)", display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
               {activeChips.map(([k, v]) => <ChipFilter key={k} label={`${k}: ${v}`} onRemove={() => setFilters({...filters, [k]: "Any"})}/>)}
-              <button className="btn btn-ghost btn-sm" style={{ padding: "2px 10px", color: "var(--fg-3)" }} onClick={() => setFilters({ type: "Any", status: "Any", resource: "Any", tag: "Any", owner: "Any" })}>Clear all</button>
+              <button className="btn btn-ghost btn-sm" style={{ padding: "2px 10px", color: "var(--fg-3)" }} onClick={() => setFilters({ nature: "Any", ownership: "Any", mgmt: "Any", status: "Any", resource: "Any", owner: "Any" })}>Clear all</button>
             </div>
           )}
 

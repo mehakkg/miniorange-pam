@@ -1,6 +1,89 @@
 // Credentials — Detail panel + Rotate Now modal + Drift reconciliation panel
 
 // =========================================================
+// LINKED / SUBSCRIBER ACCOUNTS — new section inside the detail panel
+// =========================================================
+// Sits between "Resources linked" and "Rotation". Lists accounts that share
+// this credential's password (e.g., a service account replicated to two
+// hosts). When PAM rotates the credential, the subscribers get the new
+// password too, keeping them in sync. Not a nav item of its own — this
+// relationship only makes sense inside a credential's own detail panel.
+const LINKED_SUBSCRIBERS_BY_CRED = {
+  "cred-1": [
+    { id: "sub-1", account: "svc-backup-agent",  resource: "data-warehouse-bastion", syncedAt: "3 hrs ago",  status: "synced" },
+    { id: "sub-2", account: "svc-metrics-agent", resource: "prod-db-primary",         syncedAt: "3 hrs ago",  status: "synced" },
+  ],
+  "cred-2": [
+    { id: "sub-1", account: "svc-backup-agent",  resource: "data-warehouse-bastion", syncedAt: "3 hrs ago", status: "synced" },
+  ],
+};
+
+const LinkedSubscribersSection = ({ cred }) => {
+  const [linking, setLinking] = React.useState(false);
+  const subs = LINKED_SUBSCRIBERS_BY_CRED[cred.id] || [];
+
+  const HeaderRow = (
+    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: subs.length ? 8 : 0 }}>
+      <div>
+        <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7, marginBottom: 6 }}>Linked / subscriber accounts</div>
+        <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)", maxWidth: 480 }}>
+          Accounts that share this credential's password. When it rotates, all subscribers below are updated automatically.
+        </div>
+      </div>
+      {subs.length > 0 && (
+        <button className="btn btn-sm" onClick={() => setLinking(true)}><Icon name="plus" size={11}/> Link subscriber</button>
+      )}
+    </div>
+  );
+
+  if (subs.length === 0) {
+    // Collapsed empty state — spec says do not show an empty table here.
+    return (
+      <div>
+        {HeaderRow}
+        <div style={{ marginTop: 10, padding: 10, background: "var(--bg-surface-2)", borderRadius: 6, display: "flex", alignItems: "center", gap: 10 }}>
+          <Icon name="link" size={13} color="var(--fg-4)"/>
+          <div style={{ flex: 1, font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>No linked subscriber accounts</div>
+          <button className="btn btn-sm" onClick={() => setLinking(true)}><Icon name="plus" size={11}/> Link subscriber account</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {HeaderRow}
+      <table className="table" style={{ border: "1px solid var(--border)", borderRadius: 6 }}>
+        <thead>
+          <tr>
+            <th>Subscriber account</th>
+            <th>Resource</th>
+            <th>Sync status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {subs.map(s => (
+            <tr key={s.id}>
+              <td className="t-mono" style={{ fontSize: 12.5, color: "var(--fg-1)", fontWeight: 500 }}>{s.account}</td>
+              <td className="t-mono" style={{ fontSize: 12, color: "var(--fg-2)" }}>{s.resource}</td>
+              <td>
+                {s.status === "synced"
+                  ? <span className="badge badge-success" style={{ gap: 4 }}><Icon name="check" size={10}/> Synced {s.syncedAt}</span>
+                  : <span className="badge badge-warning">Out of sync</span>}
+              </td>
+              <td style={{ textAlign: "right" }}>
+                <button className="btn btn-ghost btn-sm" style={{ color: "var(--fg-3)" }}>Unlink</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+// =========================================================
 // CREDENTIAL DETAIL PANEL — 5 vertical sections
 // =========================================================
 const CredentialDetailPanel = ({ credId, startEdit, onClose, onRotate, onDrift, onHistory, onAssignOwner, onDelete }) => {
@@ -144,6 +227,8 @@ const CredentialDetailPanel = ({ credId, startEdit, onClose, onRotate, onDrift, 
               </div>
             )}
           </DetailSection>
+
+          <LinkedSubscribersSection cred={c}/>
 
           <DetailSection title="Rotation">
             {c.rotation === "drifted" && (

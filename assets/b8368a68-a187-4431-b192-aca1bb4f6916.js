@@ -713,4 +713,190 @@ const CSVImportPanel = ({ onClose }) => {
   </Panel>;
 };
 
-Object.assign(window, { SSHKeysTab, AppSecretsTab, ReconciliationTab, RotationHealthTab, CSVImportPanel, Donut });
+// =========================================================
+// CLOUD / IAM ACCOUNTS TAB
+// =========================================================
+// A saved, pre-filtered view of the credential table for cloud provider root
+// accounts and IAM sub-accounts. Root accounts intentionally skip auto-
+// rotation (rotating a break-glass root every 30 days is worse than leaving
+// it vaulted-and-unused) — the "Vaulted — not auto-rotated" state below is
+// distinct from All Credentials' "No policy set" so it doesn't read as
+// neglect on a compliance review.
+const CLOUD_IAM_MOCK = [
+  { id: "cred-aws-root",   display: "aws-root-northwind",       provider: "AWS",   accountType: "Root",             mfa: "enabled",  lastRotated: "Never (by design)", rotation: "vaulted-only", sensitivity: "Critical" },
+  { id: "cred-aws-devops", display: "aws-iam-devops",           provider: "AWS",   accountType: "IAM sub-account",  mfa: "enabled",  lastRotated: "12 days ago",       rotation: "healthy",      sensitivity: "High"     },
+  { id: "cred-azr-sp",     display: "azure-service-principal-01", provider: "Azure", accountType: "IAM sub-account", mfa: "enabled",  lastRotated: "27 days ago",       rotation: "healthy",      sensitivity: "High"     },
+  { id: "cred-azr-root",   display: "azure-root-tenant",         provider: "Azure", accountType: "Root",            mfa: "enabled",  lastRotated: "Never (by design)", rotation: "vaulted-only", sensitivity: "Critical" },
+  { id: "cred-gcp-editor", display: "gcp-editor-01",             provider: "GCP",   accountType: "IAM sub-account", mfa: "disabled", lastRotated: "112 days ago",      rotation: "overdue",      sensitivity: "Medium"   },
+];
+
+const ProviderIcon = ({ provider }) => {
+  const map = {
+    AWS:   { label: "AWS",   bg: "#FF9900", fg: "#232F3E" },
+    Azure: { label: "Az",    bg: "#0078D4", fg: "#FFFFFF" },
+    GCP:   { label: "GCP",   bg: "#4285F4", fg: "#FFFFFF" },
+  };
+  const m = map[provider] || { label: provider.slice(0,3), bg: "var(--bg-surface-2)", fg: "var(--fg-2)" };
+  return <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+    <span style={{ width: 20, height: 20, borderRadius: 4, background: m.bg, color: m.fg, display: "inline-flex", alignItems: "center", justifyContent: "center", font: "700 9px/1 var(--font-sans)", letterSpacing: 0.4 }}>{m.label}</span>
+    <span style={{ font: "500 12.5px/1 var(--font-sans)", color: "var(--fg-1)" }}>{provider}</span>
+  </span>;
+};
+
+const CloudIAMRotationCell = ({ rotation }) => {
+  if (rotation === "vaulted-only") {
+    return <span className="badge" style={{ background: "var(--info-soft)", color: "var(--info-fg)", borderColor: "transparent", gap: 4 }} title="Vaulted — never auto-rotated by design. Distinct from 'No policy set'.">
+      <Icon name="lock" size={10}/> Vaulted — not auto-rotated
+    </span>;
+  }
+  if (rotation === "healthy")  return <span className="badge badge-success">Healthy</span>;
+  if (rotation === "overdue")  return <span className="badge badge-danger">Overdue</span>;
+  if (rotation === "failed")   return <span className="badge badge-danger">Failed</span>;
+  return <span className="badge">{rotation}</span>;
+};
+
+const CloudIAMTab = ({ onAdd }) => {
+  const rows = CLOUD_IAM_MOCK;
+  const stats = {
+    total: rows.length,
+    rootExposed: rows.filter(r => r.accountType === "Root").length,
+    mfaEnabled: rows.filter(r => r.mfa === "enabled").length,
+    overdue: rows.filter(r => r.rotation === "overdue" || r.rotation === "failed").length,
+  };
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "auto" }}>
+      <div style={{ padding: "14px 24px", borderBottom: "1px solid var(--border-subtle)", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+        <KPICard label="Total cloud/IAM credentials" value={stats.total}/>
+        <KPICard label="Root accounts (vaulted)"     value={stats.rootExposed} accent="var(--info-fg)"/>
+        <KPICard label="MFA-enabled"                  value={stats.mfaEnabled}  accent="var(--success-fg)"/>
+        <KPICard label="Rotation overdue"             value={stats.overdue}     accent="var(--danger-fg)"/>
+      </div>
+
+      <div style={{ padding: "12px 24px 0", display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)", flex: 1 }}>
+          Cloud provider root accounts and IAM sub-accounts. Root accounts are vaulted-only by design — they never auto-rotate.
+        </div>
+        <button className="btn btn-primary btn-sm" onClick={onAdd}><Icon name="plus" size={11}/> Add cloud credential</button>
+      </div>
+
+      <div style={{ flex: 1, overflow: "auto", marginTop: 12 }}>
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Display name</th>
+              <th>Provider</th>
+              <th>Account type</th>
+              <th>MFA</th>
+              <th>Last rotated</th>
+              <th>Rotation status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.id}>
+                <td><span style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--brand-fg)" }}>{r.display}</span></td>
+                <td><ProviderIcon provider={r.provider}/></td>
+                <td>
+                  {r.accountType === "Root"
+                    ? <span className="badge" style={{ background: "var(--warning-soft)", color: "var(--warning-fg)", borderColor: "transparent" }}>Root</span>
+                    : <span className="badge">IAM sub-account</span>}
+                </td>
+                <td>
+                  {r.mfa === "enabled"
+                    ? <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--success-fg)", font: "500 12.5px/1 var(--font-sans)" }}><Icon name="check" size={11} color="var(--success-fg)"/> Enabled</span>
+                    : <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--danger-fg)", font: "500 12.5px/1 var(--font-sans)" }}><Icon name="alert-circle" size={11} color="var(--danger-fg)"/> Disabled</span>}
+                </td>
+                <td className="t-tiny" style={{ color: r.lastRotated.startsWith("Never") ? "var(--fg-4)" : "var(--fg-3)" }}>{r.lastRotated}</td>
+                <td><CloudIAMRotationCell rotation={r.rotation}/></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+// =========================================================
+// BREAK-GLASS CREDENTIALS TAB
+// =========================================================
+// Scope note (from spec): this is NOT the incident record system — that lives
+// at /break-glass with its own trigger / monitor / review lifecycle. This tab
+// is a saved view of credentials tagged break-glass-eligible, showing their
+// rotation and sensitivity status and linking OUT to the incident record when
+// one is associated with the last use.
+const BG_CRED_MOCK = [
+  { id: "bg-1", display: "root-primary",         resource: "prod-db-primary",       sensitivity: "Critical", lastUsed: "May 18, 2026",  incidentId: "BG-0147", rotation: "healthy", rotationDetail: "Rotated post-incident" },
+  { id: "bg-2", display: "break-glass-oncall",   resource: "auth-server-01",         sensitivity: "Critical", lastUsed: "Never",         incidentId: null,      rotation: "healthy", rotationDetail: "Ready" },
+  { id: "bg-3", display: "fallback-admin",       resource: "data-warehouse-bastion", sensitivity: "High",     lastUsed: "Feb 12, 2026",  incidentId: "BG-0091", rotation: "healthy", rotationDetail: "Rotated 3 mo ago" },
+  { id: "bg-4", display: "recovery-jumpbox",     resource: "dev-jumpbox",            sensitivity: "Medium",   lastUsed: "Apr 03, 2026",  incidentId: "BG-0122", rotation: "pending", rotationDetail: "Post-incident rotation pending" },
+];
+
+const BreakGlassCredsTab = () => {
+  const rows = BG_CRED_MOCK;
+  const usedInLast30 = rows.filter(r => r.lastUsed && ["May 18, 2026","Apr 03, 2026"].includes(r.lastUsed)).length;
+  const rotationPending = rows.filter(r => r.rotation === "pending").length;
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "auto" }}>
+      <div style={{ padding: "14px 24px", borderBottom: "1px solid var(--border-subtle)", display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+        <KPICard label="Total break-glass-eligible credentials" value={rows.length}/>
+        <KPICard label="Used in last 30 days"                   value={usedInLast30} accent="var(--warning-fg)"/>
+        <KPICard label="Rotation pending (post-incident)"       value={rotationPending} accent="var(--danger-fg)"/>
+      </div>
+
+      <div style={{ padding: "12px 24px 0", display: "flex", alignItems: "flex-start", gap: 10 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "8px 12px", background: "var(--bg-surface-2)", borderRadius: 6, flex: 1 }}>
+          <Icon name="info" size={13} color="var(--fg-3)" style={{ marginTop: 2 }}/>
+          <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>
+            These are the credentials classified as break-glass-eligible and their rotation status. The <strong>incident lifecycle</strong> (trigger, monitor, review) lives at <a href="#" style={{ color: "var(--brand-fg)" }}>/break-glass →</a>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ flex: 1, overflow: "auto", marginTop: 12 }}>
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Display name</th>
+              <th>Resource</th>
+              <th>Sensitivity</th>
+              <th>Last used (break-glass)</th>
+              <th>Rotation status</th>
+              <th>Incident record</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.id}>
+                <td><span style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--brand-fg)" }}>{r.display}</span></td>
+                <td><span className="t-mono" style={{ fontSize: 12, color: "var(--fg-2)" }}>{r.resource}</span></td>
+                <td><SensitivityBadge level={r.sensitivity}/></td>
+                <td>
+                  {r.lastUsed === "Never"
+                    ? <span style={{ color: "var(--fg-4)", fontSize: 12.5 }}>Never</span>
+                    : <div>
+                        <div style={{ fontSize: 12.5, color: "var(--fg-2)" }}>{r.lastUsed}</div>
+                        {r.incidentId && <div style={{ font: "400 11.5px/1.3 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>({r.incidentId})</div>}
+                      </div>}
+                </td>
+                <td>
+                  {r.rotation === "healthy" && <span className="badge badge-success" style={{ gap: 4 }}><Icon name="check" size={10}/> {r.rotationDetail}</span>}
+                  {r.rotation === "pending" && <span className="badge badge-warning" style={{ gap: 4 }}><Icon name="alert-circle" size={10}/> {r.rotationDetail}</span>}
+                </td>
+                <td>
+                  {r.incidentId
+                    ? <a href="#" style={{ font: "500 12.5px/1 var(--font-sans)", color: "#7B3EA8", display: "inline-flex", alignItems: "center", gap: 4 }}>View {r.incidentId} <Icon name="chevron-right" size={10} color="#7B3EA8"/></a>
+                    : <span style={{ color: "var(--fg-4)", fontSize: 12.5 }}>—</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+Object.assign(window, { SSHKeysTab, AppSecretsTab, ReconciliationTab, RotationHealthTab, CSVImportPanel, Donut, CloudIAMTab, BreakGlassCredsTab });
