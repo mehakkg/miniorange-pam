@@ -97,7 +97,9 @@ const ResourceDetailV2 = ({ resource, onBack }) => {
         {tab === "audit" && <AuditTab r={r}/>}
       </div>
 
-      {confirmRevoke && <RevokeModal user={confirmRevoke} resource={r.name} onClose={() => setConfirmRevoke(null)}/>}
+      {confirmRevoke && (confirmRevoke.pivot === "user"
+        ? <RevokeModal subject={confirmRevoke.row} resource={r.name} onClose={() => setConfirmRevoke(null)}/>
+        : <RevokeAllGroupModal subject={confirmRevoke.row} pivot={confirmRevoke.pivot} resource={r.name} onClose={() => setConfirmRevoke(null)}/>)}
       {allocatePrefill && <ResourceAllocatePanelV3 resource={r} prefill={allocatePrefill} onClose={() => setAllocatePrefill(null)} onAllocated={(payload) => setToast({ kind: "success", text: `Access allocated to ${payload?.subjectSummary || "recipient"}` })}/>}
       {confirmDelete && <ConfirmModal
         title={`Delete ${r.name}?`}
@@ -318,39 +320,39 @@ const ACCESS_WINDOW_META = {
 const buildAccessData = (r) => ({
   user: {
     allocated: [
-      { id: "u-priya",  name: "Priya Iyer",   secondary: "Admin · DBA leads",       window: { type: "lifelong" }, lastActivity: "2h ago",  risk: "high", policy: "Production SSH access", credential: "root-primary" },
-      { id: "u-marcus", name: "Marcus Chen",  secondary: "Operator · DevOps team",   window: { type: "custom", expiresAt: "Apr 30 · 18:00", remaining: "in 2h 14m", expiring: true }, lastActivity: "12m ago", risk: "med", policy: "Production SSH access", credential: "root-primary" },
-      { id: "u-aria",   name: "Aria Chen",    secondary: "Security Admin · You",     window: { type: "workingHours" }, lastActivity: "42m ago", risk: "low", policy: "Production SSH access", credential: "root-primary" },
-      { id: "u-dana",   name: "Dana Whitley", secondary: "Contractor · ends May 15", window: { type: "oneTime", used: false }, lastActivity: "Never", risk: "med", policy: "Break-glass window", credential: "ssh-deploy" },
+      { id: "u-priya",  name: "Priya Iyer",   role: "Admin",       secondary: "Admin · DBA leads",       window: { type: "lifelong" }, lastActivity: "2h ago",  risk: "high", policy: "Production SSH access", credential: "root-primary" },
+      { id: "u-marcus", name: "Marcus Chen",  role: "Operator",    secondary: "Operator · DevOps team",   window: { type: "custom", expiresAt: "Apr 30 · 18:00", remaining: "in 2h 14m", expiring: true }, lastActivity: "12m ago", risk: "med", policy: "Production SSH access", credential: "root-primary" },
+      { id: "u-aria",   name: "Aria Chen",    role: "Security Admin", secondary: "Security Admin · You",     window: { type: "workingHours" }, lastActivity: "42m ago", risk: "low", policy: "Production SSH access", credential: "root-primary" },
+      { id: "u-dana",   name: "Dana Whitley", role: "Contractor",  secondary: "Contractor · ends May 15", window: { type: "oneTime", used: false }, lastActivity: "Never", risk: "med", policy: "Break-glass window", credential: "ssh-deploy" },
     ],
     notAllocated: [
-      { id: "u-kai",    name: "Kai Watanabe",   secondary: "DBA candidate",         suggestedWindow: "workingHours", signal: "Requested TKT-2104", pending: { ticket: "TKT-2104", requestedAt: "18h ago" }, risk: "med" },
-      { id: "u-diego",  name: "Diego Vasquez",  secondary: "Operator · DevOps team", suggestedWindow: "workingHours", signal: "Group DevOps team peer", risk: "low" },
-      { id: "u-lea",    name: "Léa Martin",     secondary: "SRE · On-call rotation", suggestedWindow: "zeroday",      signal: "On-call · eligible via SRE policy", risk: "low" },
-      { id: "u-jamal",  name: "Jamal Green",    secondary: "Auditor",                suggestedWindow: "oneTime",      signal: "Compliance review window", risk: "low" },
+      { id: "u-kai",    name: "Kai Watanabe",   role: "DBA candidate", secondary: "DBA candidate",         lastResourceAccessed: { name: "audit-readonly-replica", when: "1 day ago" }, suggestedWindow: "workingHours", eligibility: "Requested via TKT-2104", pending: { ticket: "TKT-2104", requestedAt: "18h ago" }, risk: "med" },
+      { id: "u-diego",  name: "Diego Vasquez",  role: "Operator",      secondary: "Operator · DevOps team", lastResourceAccessed: { name: "dev-jumpbox", when: "2 hrs ago" },              suggestedWindow: "workingHours", eligibility: "Eligible via Operator role policy", risk: "low" },
+      { id: "u-lea",    name: "Léa Martin",     role: "SRE",           secondary: "SRE · On-call rotation", lastResourceAccessed: { name: "data-warehouse-bastion", when: "4 hrs ago" },   suggestedWindow: "zeroday",      eligibility: "On-call · eligible via SRE policy", risk: "low" },
+      { id: "u-jamal",  name: "Jamal Green",    role: "Auditor",       secondary: "Auditor",                lastResourceAccessed: { name: "—", when: "never accessed a resource" },        suggestedWindow: "oneTime",      eligibility: "Eligible via Auditor role policy", risk: "low" },
     ],
   },
   group: {
     allocated: [
-      { id: "g-devops", name: "DevOps team",      secondary: "8 members", window: { type: "workingHours" }, lastActivity: "12m ago", risk: "med",  policy: "Production SSH access", credential: "ssh-deploy" },
-      { id: "g-oncall", name: "On-call rotation", secondary: "5 members", window: { type: "lifelong" },     lastActivity: "5h ago",  risk: "high", policy: "Break-glass window",     credential: "ssh-deploy" },
-      { id: "g-dba",    name: "DBA leads",        secondary: "3 members", window: { type: "lifelong" },     lastActivity: "2h ago",  risk: "high", policy: "Production SSH access", credential: "root-primary" },
+      { id: "g-devops", name: "DevOps team",      secondary: "8 members", memberCount: 8, window: { type: "workingHours" }, lastActivity: "12m ago", risk: "med",  policy: "Production SSH access", credential: "ssh-deploy" },
+      { id: "g-oncall", name: "On-call rotation", secondary: "5 members", memberCount: 5, window: { type: "lifelong" },     lastActivity: "5h ago",  risk: "high", policy: "Break-glass window",     credential: "ssh-deploy" },
+      { id: "g-dba",    name: "DBA leads",        secondary: "3 members", memberCount: 3, window: { type: "lifelong" },     lastActivity: "2h ago",  risk: "high", policy: "Production SSH access", credential: "root-primary" },
     ],
     notAllocated: [
-      { id: "g-platform",  name: "Platform team", secondary: "6 members", suggestedWindow: "workingHours", signal: "Owns adjacent resources",       risk: "med" },
-      { id: "g-dataeng",   name: "Data-Platform", secondary: "4 members", suggestedWindow: "custom",       signal: "Consumes prod-db-primary reads", risk: "med" },
-      { id: "g-sreoncall", name: "SRE-oncall",    secondary: "7 members", suggestedWindow: "zeroday",      signal: "Peers with On-call rotation",   risk: "low" },
+      { id: "g-platform",  name: "Platform team", secondary: "6 members", memberCount: 6, lastResourceAccessed: { name: "prod-db-replica", when: "1 hr ago" },        suggestedWindow: "workingHours", eligibility: "Owns adjacent resources",       risk: "med" },
+      { id: "g-dataeng",   name: "Data-Platform", secondary: "4 members", memberCount: 4, lastResourceAccessed: { name: "audit-readonly-replica", when: "3 hrs ago" }, suggestedWindow: "custom",       eligibility: "Consumes prod-db-primary reads", risk: "med" },
+      { id: "g-sreoncall", name: "SRE-oncall",    secondary: "7 members", memberCount: 7, lastResourceAccessed: { name: "k8s-control-plane-aws", when: "42 min ago" }, suggestedWindow: "zeroday",      eligibility: "Peers with On-call rotation",   risk: "low" },
     ],
   },
   role: {
     allocated: [
-      { id: "r-admin",    name: "Admin",    secondary: "12 members", window: { type: "lifelong" },     lastActivity: "2h ago",  risk: "high", policy: "Production SSH access", credential: "root-primary" },
-      { id: "r-operator", name: "Operator", secondary: "24 members", window: { type: "workingHours" }, lastActivity: "12m ago", risk: "med",  policy: "Production SSH access", credential: "ssh-deploy" },
+      { id: "r-admin",    name: "Admin",    secondary: "12 members", memberCount: 12, window: { type: "lifelong" },     lastActivity: "2h ago",  risk: "high", policy: "Production SSH access", credential: "root-primary" },
+      { id: "r-operator", name: "Operator", secondary: "24 members", memberCount: 24, window: { type: "workingHours" }, lastActivity: "12m ago", risk: "med",  policy: "Production SSH access", credential: "ssh-deploy" },
     ],
     notAllocated: [
-      { id: "r-auditor", name: "Auditor",       secondary: "4 members",       suggestedWindow: "oneTime",      signal: "Compliance quarterly review", risk: "low" },
-      { id: "r-rodba",   name: "Read-only DBA", secondary: "Not yet assigned", suggestedWindow: "workingHours", signal: "Proposed by Platform lead",  risk: "low" },
-      { id: "r-enduser", name: "End User",      secondary: "146 members",     suggestedWindow: "oneTime",      signal: "Direct DB access not typical", risk: "high" },
+      { id: "r-auditor", name: "Auditor",       secondary: "4 members",       memberCount: 4,   lastResourceAccessed: { name: "audit-readonly-replica", when: "2 days ago" }, suggestedWindow: "oneTime",      eligibility: "Compliance quarterly review", risk: "low" },
+      { id: "r-rodba",   name: "Read-only DBA", secondary: "Not yet assigned", memberCount: 0,   lastResourceAccessed: { name: "—", when: "role not yet assigned" },          suggestedWindow: "workingHours", eligibility: "Proposed by Platform lead",  risk: "low" },
+      { id: "r-enduser", name: "End User",      secondary: "146 members",     memberCount: 146, lastResourceAccessed: { name: "kestrel-admin-portal", when: "8 min ago" },     suggestedWindow: "oneTime",      eligibility: "Direct DB access not typical", risk: "high" },
     ],
   },
 });
@@ -531,11 +533,21 @@ const AccessSection = ({ r, onRevoke, onAllocate }) => {
         <div className="card" style={{ borderColor: "var(--border)" }}>
           {filteredRows.length === 0 ? (
             <div style={{ padding: 34, textAlign: "center", color: "var(--fg-4)", font: "400 13px/1.5 var(--font-sans)" }}>
-              {q
-                ? `No ${showingAllocated ? "allocated" : "not-allocated"} ${pivotLabel.replace("By ", "")}s match "${pivotState.query}".`
-                : (showingAllocated
-                    ? `No ${pivotLabel.toLowerCase()} grants on this resource.`
-                    : `No ${pivotLabel.replace("By ", "")}s pending review.`)}
+              {q ? (
+                <>No {showingAllocated ? "allocated" : "not-allocated"} {pivotLabel.replace("By ", "")}s match "{pivotState.query}".</>
+              ) : showingAllocated ? (
+                <>No {pivotLabel.toLowerCase()} grants on this resource.</>
+              ) : (
+                // Everyone eligible for this resource already has access.
+                <div style={{ padding: "10px 0" }}>
+                  <div style={{ font: "500 13px/1.5 var(--font-sans)", color: "var(--fg-2)", marginBottom: 6 }}>
+                    Everyone eligible for {r.name} already has access.
+                  </div>
+                  <a href="#" style={{ font: "500 12.5px/1 var(--font-sans)", color: "var(--brand-fg)" }}>
+                    Review eligibility criteria →
+                  </a>
+                </div>
+              )}
             </div>
           ) : showingAllocated ? (
             <table className="table">
@@ -561,7 +573,12 @@ const AccessSection = ({ r, onRevoke, onAllocate }) => {
                       <div className="t-mono" style={{ fontSize: 11.5, color: "var(--fg-3)", marginTop: 2 }}>{row.credential}</div>
                     </td>
                     <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                      <button className="btn btn-ghost btn-sm" style={{ color: "var(--danger-fg)" }} onClick={() => onRevoke(row.name)}>Revoke</button>
+                      <RowMenu items={[
+                        { label: "Edit allocation", icon: "edit",  onClick: () => openAllocate(row) },
+                        { label: "Revoke access",   icon: "x",     danger: true, onClick: () => onRevoke({ pivot, row }) },
+                        { divider: true },
+                        { label: "View history",    icon: "history", onClick: () => {} },
+                      ]}/>
                     </td>
                   </tr>
                 ))}
@@ -571,31 +588,38 @@ const AccessSection = ({ r, onRevoke, onAllocate }) => {
             <table className="table">
               <thead>
                 <tr>
-                  <th style={{ width: "24%" }}>{subjectHeader}</th>
-                  <th style={{ width: "20%" }}>Suggested window</th>
-                  <th style={{ width: "28%" }}>Signal</th>
-                  <th style={{ width: "12%" }}>Predicted risk</th>
-                  <th style={{ width: "16%", textAlign: "right" }}></th>
+                  <th style={{ width: "22%" }}>{subjectHeader}</th>
+                  <th style={{ width: "14%" }}>{pivot === "user" ? "Role" : "Members"}</th>
+                  <th style={{ width: "26%" }}>Last resource accessed</th>
+                  <th style={{ width: "24%" }}>Eligibility note</th>
+                  <th style={{ width: "14%", textAlign: "right" }}></th>
                 </tr>
               </thead>
               <tbody>
                 {filteredRows.map(row => {
-                  const wMeta = ACCESS_WINDOW_META[row.suggestedWindow] || ACCESS_WINDOW_META.custom;
+                  const lastRes = row.lastResourceAccessed || {};
                   return (
                     <tr key={row.id}>
                       <td><SubjectCell kind={pivot} name={row.name} secondary={row.secondary} pending={row.pending}/></td>
                       <td>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          <span style={{ width: 6, height: 6, borderRadius: "50%", background: wMeta.dot }}/>
-                          <span style={{ font: "500 12.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{wMeta.label}</span>
-                        </div>
-                        <div style={{ font: "400 11.5px/1.3 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>Recommended</div>
+                        {pivot === "user"
+                          ? <span className="badge" style={{ background: "var(--brand-soft)", color: "var(--brand-fg)", borderColor: "transparent" }}>{row.role || "—"}</span>
+                          : <span style={{ font: "500 12.5px/1.3 var(--font-sans)", color: "var(--fg-2)" }}>{row.memberCount != null ? `${row.memberCount} member${row.memberCount === 1 ? "" : "s"}` : "—"}</span>}
                       </td>
-                      <td style={{ fontSize: 12.5, color: "var(--fg-2)" }}>{row.signal}</td>
-                      <td><RiskChip level={row.risk}/></td>
+                      <td>
+                        {lastRes.name && lastRes.name !== "—" ? (
+                          <>
+                            <div className="t-mono" style={{ fontSize: 12, color: "var(--fg-1)" }}>{lastRes.name}</div>
+                            <div style={{ font: "400 11.5px/1.3 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>{lastRes.when}</div>
+                          </>
+                        ) : (
+                          <span style={{ fontSize: 12.5, color: "var(--fg-4)" }}>— {lastRes.when || "never accessed"}</span>
+                        )}
+                      </td>
+                      <td style={{ fontSize: 12.5, color: "var(--fg-2)" }}>{row.eligibility}</td>
                       <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                         <button className="btn btn-primary btn-sm" onClick={() => openAllocate(row)}>
-                          {row.pending ? "Review & allocate" : "Allocate"}
+                          {row.pending ? "Review & allocate" : "Allocate →"}
                         </button>
                       </td>
                     </tr>
@@ -737,25 +761,99 @@ const AuditTab = ({ r }) => {
   );
 };
 
-const RevokeModal = ({ user, resource, onClose }) => {
+// Single-subject revoke — used for user rows in the resource-scoped Access.
+// Reason is optional per spec (routine action, not break-glass).
+const RevokeModal = ({ subject, resource, onClose }) => {
   const [reason, setReason] = React.useState("");
+  const name = subject?.name || subject;
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(15, 23, 42, 0.55)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}>
-      <div style={{ width: 460, background: "var(--bg-app)", borderRadius: 10, boxShadow: "0 24px 64px rgba(0,0,0,0.25)" }} onClick={e => e.stopPropagation()}>
+      <div style={{ width: 480, background: "var(--bg-app)", borderRadius: 10, boxShadow: "0 24px 64px rgba(0,0,0,0.25)" }} onClick={e => e.stopPropagation()}>
         <div style={{ padding: 20, borderBottom: "1px solid var(--border)" }}>
-          <h2 style={{ font: "600 15px/1.3 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Revoke access for {user}?</h2>
+          <h2 style={{ font: "600 15px/1.3 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Revoke access?</h2>
+          <div style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>{name} → {resource}</div>
         </div>
         <div style={{ padding: 20 }}>
-          <p style={{ font: "400 13px/1.5 var(--font-sans)", color: "var(--fg-2)", margin: "0 0 14px" }}>
-            This will immediately end any active sessions and remove their access to <strong>{resource}</strong>.
-          </p>
-          <Field label="Reason for revocation" required>
-            <textarea className="input" rows={3} value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. employment ended, scope creep, finished project"/>
+          <div style={{ padding: 12, background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 6, font: "500 12.5px/1.5 var(--font-sans)", marginBottom: 14, display: "flex", gap: 8, alignItems: "flex-start" }}>
+            <Icon name="alert-triangle" size={13} color="var(--warning-fg)" style={{ marginTop: 2 }}/>
+            <div>This immediately removes {name}'s access. They cannot use {resource} until access is re-granted.</div>
+          </div>
+          <Field label="Revocation reason (optional)" hint="Access revocation is a routine action — the reason is optional but appears on the audit trail for future reviewers.">
+            <textarea className="input" rows={3} value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. employment ended, scope creep, project finished"/>
           </Field>
         </div>
         <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end", gap: 8, background: "var(--bg-surface)" }}>
           <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn" disabled={!reason.trim()} style={{ background: "var(--danger)", color: "#fff", borderColor: "transparent", opacity: reason.trim() ? 1 : 0.5 }}>Revoke access</button>
+          <button className="btn" onClick={onClose} style={{ background: "var(--danger)", color: "#fff", borderColor: "transparent" }}>Revoke access</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Group/role bulk revoke — used when the row is a group or role. Shows an
+// expandable preview of every member who will lose access. Compliance-visible.
+const REVOKE_GROUP_MEMBERS = {
+  "g-devops": ["Priya Iyer","Marcus Chen","Diego Vasquez","Léa Martin","Aditya Kulkarni","Rohan Mehta","Kai Watanabe","Sarvesh Joshi"],
+  "g-oncall": ["Priya Iyer","Marcus Chen","Léa Martin","Kai Watanabe","Sarvesh Joshi"],
+  "g-dba":    ["Priya Iyer","Rohan Mehta","Kai Watanabe"],
+  "r-admin":  ["Priya Iyer","Rohan Mehta","Arjun Bansal","Aria Chen","Marcus Chen","Kai Watanabe","Vivek Rao","Sarvesh Joshi","Léa Martin","Diego Vasquez","Aditya Kulkarni","Mohak Sharma"],
+  "r-operator": ["Priya Iyer","Marcus Chen","Diego Vasquez","Léa Martin","Kai Watanabe","Aditya Kulkarni","Rohan Mehta","Sarvesh Joshi"],
+};
+
+const RevokeAllGroupModal = ({ subject, pivot, resource, onClose }) => {
+  const [expanded, setExpanded] = React.useState(false);
+  const [reason, setReason] = React.useState("");
+  const members = REVOKE_GROUP_MEMBERS[subject.id] || Array.from({ length: subject.memberCount || 0 }, (_, i) => `Member ${i + 1}`);
+  const memberCount = subject.memberCount ?? members.length;
+  const kindLabel = pivot === "group" ? "group" : "role";
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(15, 23, 42, 0.55)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}>
+      <div style={{ width: 480, maxHeight: "84vh", background: "var(--bg-app)", borderRadius: 10, boxShadow: "0 24px 64px rgba(0,0,0,0.25)", display: "flex", flexDirection: "column" }} onClick={e => e.stopPropagation()}>
+        <div style={{ padding: 20, borderBottom: "1px solid var(--border)" }}>
+          <h2 style={{ font: "600 15px/1.3 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Revoke all access for {subject.name}?</h2>
+          <div style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>
+            This affects <strong style={{ color: "var(--fg-1)" }}>{memberCount} member{memberCount === 1 ? "" : "s"}</strong> currently allocated to {resource}.
+          </div>
+        </div>
+
+        <div style={{ padding: "16px 20px", overflowY: "auto", flex: 1 }}>
+          <div style={{ padding: 12, background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 6, font: "500 12.5px/1.5 var(--font-sans)", marginBottom: 14, display: "flex", gap: 8, alignItems: "flex-start" }}>
+            <Icon name="alert-triangle" size={13} color="var(--warning-fg)" style={{ marginTop: 2 }}/>
+            <div>Revocation applies to every member of this {kindLabel}. Any active session on {resource} owned by these users will be disconnected immediately.</div>
+          </div>
+
+          <button
+            onClick={() => setExpanded(x => !x)}
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", padding: 0, cursor: "pointer", font: "600 12px/1 var(--font-sans)", color: "var(--fg-2)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 8 }}
+          >
+            <Icon name={expanded ? "chevron-down" : "chevron-right"} size={11}/>
+            {expanded ? "Hide" : "Preview"} the {memberCount} member{memberCount === 1 ? "" : "s"}
+          </button>
+
+          {expanded && (
+            <div style={{ border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-surface)", padding: 4, maxHeight: 220, overflowY: "auto" }}>
+              {members.map((m, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 4 }}>
+                  <Avatar name={m} size={20}/>
+                  <span style={{ font: "500 12.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{m}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ marginTop: 14 }}>
+            <Field label="Revocation reason (optional)" hint="Recorded on the audit trail alongside each individual revocation.">
+              <textarea className="input" rows={3} value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. team reorganization, resource retired"/>
+            </Field>
+          </div>
+        </div>
+
+        <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end", gap: 8, background: "var(--bg-surface)" }}>
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn" onClick={onClose} style={{ background: "var(--danger)", color: "#fff", borderColor: "transparent" }}>
+            <Icon name="x" size={12} color="#fff"/> Revoke all ({memberCount})
+          </button>
         </div>
       </div>
     </div>
