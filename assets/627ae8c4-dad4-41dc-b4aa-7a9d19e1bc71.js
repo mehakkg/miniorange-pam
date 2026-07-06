@@ -131,142 +131,396 @@ const SectionLabel = ({ children }) => (
   <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7, marginBottom: 12 }}>{children}</div>
 );
 
+// ─── Person-scope access data ─────────────────────────────────────────────
+// One person's full access footprint across every resource. This is what the
+// Access tab renders. Structural notes from the spec:
+//   • No Allocated / Not-Allocated split at the person level — "not allocated
+//     to what?" is not a bounded question here.
+//   • Row shape mirrors the resource-scoped Allocated row (same window chip,
+//     same policy + credential columns) so admins can pattern-match between
+//     the two views without reorienting.
+//   • activeSession=true rows drive the offboarding-modal's warning.
+const PERSON_ACCESS_ROWS_BY_ID = {
+  "u-001": [
+    { id: "pa-1", resource: "prod-db-primary",      env: "Production", resourceType: "database", window: { type: "workingHours" }, policy: "Production DB Policy", credential: "root-db-primary", risk: "med",  activeSession: false },
+    { id: "pa-2", resource: "auth-server-01",        env: "Production", resourceType: "server",   window: { type: "custom", expiresAt: "May 20, 2026 18:00", remaining: "in 6 days" }, policy: "Production SSH access", credential: "ssh-deploy",   risk: "low",  activeSession: false },
+    { id: "pa-3", resource: "data-warehouse-bastion", env: "Production", resourceType: "server",   window: { type: "workingHours" }, policy: "SRE operations",      credential: "ssh-deploy",       risk: "low",  activeSession: false },
+    { id: "pa-4", resource: "k8s-control-plane-aws", env: "Production", resourceType: "cloud",    window: { type: "custom", expiresAt: "in 2h 14m", remaining: "JIT 3h" }, policy: "K8s Production Policy", credential: "eks-admin-token", risk: "med",  activeSession: true },
+  ],
+  "u-002": [
+    { id: "pa-1", resource: "prod-db-primary",      env: "Production", resourceType: "database", window: { type: "lifelong" },      policy: "Production DB Policy", credential: "root-db-primary", risk: "high", activeSession: false },
+    { id: "pa-2", resource: "k8s-control-plane-aws", env: "Production", resourceType: "cloud",    window: { type: "custom", expiresAt: "in 00:41:12", remaining: "JIT 3h" }, policy: "K8s Production Policy", credential: "eks-admin-token", risk: "med",  activeSession: true },
+  ],
+  "u-005": [
+    { id: "pa-1", resource: "prod-db-primary",      env: "Production", resourceType: "database", window: { type: "lifelong" }, policy: "Production DB Policy", credential: "root-db-primary", risk: "high", activeSession: false },
+    { id: "pa-2", resource: "auth-server-01",        env: "Production", resourceType: "server",   window: { type: "lifelong" }, policy: "Production SSH access", credential: "root-primary",    risk: "high", activeSession: false },
+    { id: "pa-3", resource: "data-warehouse-bastion", env: "Production", resourceType: "server",  window: { type: "workingHours" }, policy: "SRE operations", credential: "ssh-deploy", risk: "med", activeSession: false },
+  ],
+};
+const personAccessFor = (u) => PERSON_ACCESS_ROWS_BY_ID[u.id] || [
+  { id: "pa-1", resource: "dev-jumpbox", env: "Development", resourceType: "server", window: { type: "workingHours" }, policy: "SRE operations", credential: "ssh-deploy", risk: "low", activeSession: false },
+];
+
+// Standardized access-window chip for the person view. Same visual grammar as
+// AccessWindowCell on the resource side — kept as a small local copy rather
+// than reaching across scripts, since these render standalone one-liners here.
+const PersonAccessWindowChip = ({ window: w }) => {
+  const meta = {
+    lifelong:     { label: "Lifelong",       dot: "var(--fg-4)" },
+    custom:       { label: "Custom",         dot: "var(--brand)" },
+    zeroday:      { label: "Zero Day",       dot: "var(--warning-fg)" },
+    oneTime:      { label: "One-time",       dot: "var(--info-fg)" },
+    workingHours: { label: "Working hrs",    dot: "var(--success-fg)" },
+  }[w.type] || { label: w.type, dot: "var(--fg-4)" };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span style={{ width: 6, height: 6, borderRadius: "50%", background: meta.dot, flexShrink: 0 }}/>
+        <span style={{ font: "500 12.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{meta.label}{w.remaining ? ` · ${w.remaining}` : ""}</span>
+      </div>
+      {w.expiresAt && (
+        <div style={{ font: "400 11.5px/1.3 var(--font-sans)", color: "var(--fg-4)" }}>Expires {w.expiresAt}</div>
+      )}
+      {w.type === "workingHours" && (
+        <div style={{ font: "400 11.5px/1.3 var(--font-sans)", color: "var(--fg-4)" }}>Mon–Fri · 09:00–18:00</div>
+      )}
+      {w.type === "lifelong" && (
+        <span className="badge badge-warning" style={{ alignSelf: "flex-start", gap: 4 }}>
+          <Icon name="alert-triangle" size={10}/> No expiry set
+        </span>
+      )}
+    </div>
+  );
+};
+
+const PersonRiskChip = ({ level }) => {
+  if (!level) return <span style={{ color: "var(--fg-4)", fontSize: 12.5 }}>—</span>;
+  const map = {
+    low:  { cls: "badge badge-success", label: "Low" },
+    med:  { cls: "badge badge-warning", label: "⚑ 1 risk" },
+    high: { cls: "badge badge-danger",  label: "⚑ High" },
+  };
+  const m = map[level] || map.low;
+  return <span className={m.cls}>{m.label}</span>;
+};
+
+// ─── Person Access tab ──────────────────────────────────────────────────────
+// Full access footprint for one user + a single primary action (Revoke all)
+// that opens the offboarding modal. No filter chips, no allocated vs not-
+// allocated split — this view exists precisely so an admin can offboard in
+// one place.
+const PersonAccessTab = ({ user, onRevokeAll, onRevokeRow }) => {
+  const rows = personAccessFor(user);
+  const activeCount = rows.filter(r => r.activeSession).length;
+  return (
+    <div style={{ padding: "20px 20px 24px", display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ flex: 1, minWidth: 220 }}>
+          <div style={{ font: "600 13.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>Access footprint · {rows.length} resource{rows.length === 1 ? "" : "s"}</div>
+          <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 3 }}>
+            Every resource {user.name.split(" ")[0]} currently holds access to. Revoking here removes {user.name.split(" ")[0]}'s access from each resource's Allocated table too.
+          </div>
+        </div>
+        <button
+          className="btn"
+          style={{ background: "var(--danger)", color: "#fff", border: "none" }}
+          onClick={onRevokeAll}
+          disabled={rows.length === 0}
+        >
+          <Icon name="x" size={12} color="#fff"/> Revoke all access
+        </button>
+      </div>
+
+      {activeCount > 0 && (
+        <div style={{ padding: 10, background: "var(--warning-soft)", borderRadius: 6, display: "flex", gap: 8, alignItems: "flex-start", font: "500 12.5px/1.5 var(--font-sans)", color: "var(--warning-fg)" }}>
+          <Icon name="alert-triangle" size={13} color="var(--warning-fg)" style={{ marginTop: 2 }}/>
+          <div>
+            <strong>{user.name.split(" ")[0]} has {activeCount} active session{activeCount === 1 ? "" : "s"}</strong> — revoking will disconnect immediately.
+          </div>
+        </div>
+      )}
+
+      <div className="card" style={{ overflow: "hidden" }}>
+        {rows.length === 0 ? (
+          <div style={{ padding: 32, textAlign: "center", color: "var(--fg-4)", font: "400 13px/1.5 var(--font-sans)" }}>
+            {user.name.split(" ")[0]} has no allocated resources.
+          </div>
+        ) : (
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Resource</th>
+                <th style={{ width: "26%" }}>Access window</th>
+                <th style={{ width: "20%" }}>Policy · credential</th>
+                <th style={{ width: "14%" }}>Risk</th>
+                <th style={{ width: "8%", textAlign: "right" }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.id}>
+                  <td>
+                    <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                      <Icon name={r.resourceType === "database" ? "database" : r.resourceType === "cloud" ? "cloud" : "server"} size={13} color="var(--fg-3)"/>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{r.resource}</div>
+                        <div style={{ font: "400 11.5px/1.3 var(--font-sans)", color: "var(--fg-4)", marginTop: 2, display: "flex", alignItems: "center", gap: 5 }}>
+                          {r.env}
+                          {r.activeSession && <span style={{ display: "inline-flex", alignItems: "center", gap: 3, color: "var(--warning-fg)", fontWeight: 500 }}>· <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--warning-fg)" }}/> active session</span>}
+                        </div>
+                      </div>
+                    </div>
+                  </td>
+                  <td><PersonAccessWindowChip window={r.window}/></td>
+                  <td>
+                    <div style={{ font: "500 12.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{r.policy}</div>
+                    <div className="t-mono" style={{ fontSize: 11.5, color: "var(--fg-3)", marginTop: 2 }}>{r.credential}</div>
+                  </td>
+                  <td><PersonRiskChip level={r.risk}/></td>
+                  <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                    <button className="btn btn-ghost btn-sm" style={{ color: "var(--danger-fg)" }} onClick={() => onRevokeRow(r)}>Revoke</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─── Revoke-all offboarding modal ──────────────────────────────────────────
+// Compliance-sensitive: shows the full list uncollapsed, flags any active
+// session that will be terminated on confirm.
+const PersonRevokeAllModal = ({ user, rows, onClose, onConfirm }) => {
+  const activeRows = rows.filter(r => r.activeSession);
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(15, 23, 42, 0.55)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}>
+      <div style={{ width: 560, maxHeight: "84vh", background: "var(--bg-app)", borderRadius: 10, boxShadow: "0 24px 64px rgba(0,0,0,0.25)", display: "flex", flexDirection: "column" }} onClick={e => e.stopPropagation()}>
+        <div style={{ padding: 20, borderBottom: "1px solid var(--border)" }}>
+          <h2 style={{ font: "600 15.5px/1.3 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Revoke all access for {user.name}?</h2>
+          <div style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>
+            This affects {rows.length} resource{rows.length === 1 ? "" : "s"}. Every row below will disappear from this table and from each resource's Allocated table.
+          </div>
+        </div>
+
+        <div style={{ padding: "16px 20px", overflowY: "auto", flex: 1 }}>
+          {activeRows.length > 0 && (
+            <div style={{ padding: 12, background: "var(--warning-soft)", borderRadius: 6, marginBottom: 14, display: "flex", gap: 10, alignItems: "flex-start" }}>
+              <Icon name="alert-triangle" size={14} color="var(--warning-fg)" style={{ marginTop: 2 }}/>
+              <div style={{ font: "500 12.5px/1.5 var(--font-sans)", color: "var(--warning-fg)" }}>
+                <strong>{user.name} has {activeRows.length} active session{activeRows.length === 1 ? "" : "s"}</strong> on {activeRows.map(r => r.resource).join(", ")}. Revoking will disconnect {activeRows.length === 1 ? "this session" : "these sessions"} immediately.
+              </div>
+            </div>
+          )}
+
+          <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 8 }}>Access to be revoked</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {rows.map(r => {
+              const winLabel = r.window.type === "lifelong" ? "Lifelong access"
+                             : r.window.type === "custom" ? `Custom · ${r.window.remaining || r.window.expiresAt || ""}`
+                             : r.window.type === "workingHours" ? "Working hours access"
+                             : r.window.type === "zeroday" ? "Zero-day access"
+                             : "One-time access";
+              return (
+                <div key={r.id} style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 6, background: r.activeSession ? "var(--warning-soft)" : "var(--bg-surface)", display: "flex", alignItems: "center", gap: 10 }}>
+                  <Icon name={r.resourceType === "database" ? "database" : r.resourceType === "cloud" ? "cloud" : "server"} size={13} color={r.activeSession ? "var(--warning-fg)" : "var(--fg-3)"}/>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{r.resource}</div>
+                    <div style={{ font: "400 11.5px/1.3 var(--font-sans)", color: r.activeSession ? "var(--warning-fg)" : "var(--fg-4)", marginTop: 2 }}>
+                      {winLabel}{r.activeSession && " · currently active"}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end", gap: 8, background: "var(--bg-surface)" }}>
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn" onClick={onConfirm} style={{ background: "var(--danger)", color: "#fff", borderColor: "transparent" }}>
+            <Icon name="x" size={12} color="#fff"/> Revoke all ({rows.length})
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ===== USER DETAIL PANEL =====
 const UserDetailPanel = ({ userId, onClose }) => {
   const u = (window.PEOPLE_USERS || []).find(x => x.id === userId);
-  const [accessFilter, setAccessFilter] = React.useState("All");
+  const [tab, setTab] = React.useState("overview");
+  const [revokeAllOpen, setRevokeAllOpen] = React.useState(false);
+  const [rowRevoke, setRowRevoke] = React.useState(null);
+  const [toast, setToast] = React.useState(null);
+  const [revoked, setRevoked] = React.useState(new Set()); // per-row optimistic revoke
   if (!u) return null;
 
-  const accessRows = [
-    { res: "prod-db-01",       type: "database", env: "Production", via: "Via Group: Production Access", window: "Anytime",          status: "Active" },
-    { res: "ssh-server-linux", type: "server",   env: "Production", via: "Via Group: DevOps Team",       window: "Mon–Fri 09–19",    status: "Active" },
-    { res: "k8s-control-plane-aws", type: "cloud", env: "Production", via: "Direct",                     window: "JIT — expires in 2h 14m", status: "Expiring" },
-    { res: "data-warehouse-bastion", type: "server", env: "Production", via: "Via Group: DevOps Team",   window: "Anytime",          status: "Active" },
-    { res: "dev-jumpbox",      type: "server",   env: "Dev",        via: "Via Role: Operator",           window: "Anytime",          status: "Active" },
-    { res: "audit-readonly-replica", type: "database", env: "Production", via: "Direct",                  window: "Last access expired", status: "Expired" },
-  ];
-  const filtered = accessFilter === "All" ? accessRows : accessFilter === "Active" ? accessRows.filter(r => r.status === "Active") : accessFilter === "Expiring" ? accessRows.filter(r => r.status === "Expiring") : accessFilter === "Direct" ? accessRows.filter(r => r.via === "Direct") : accessRows.filter(r => r.via.startsWith("Via Group"));
+  const baseRows = personAccessFor(u);
+  const visibleRows = baseRows.filter(r => !revoked.has(r.id));
 
   return (
     <>
       <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.18)", zIndex: 40 }}/>
-      <aside style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 520, background: "var(--bg-app)", borderLeft: "1px solid var(--border)", zIndex: 41, display: "flex", flexDirection: "column", boxShadow: "var(--shadow-lg)" }}>
-        <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "flex-start", gap: 12 }}>
-          <Avatar name={u.name} size={44}/>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <h2 style={{ font: "600 17px/1.3 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>{u.name}</h2>
-            <div style={{ font: "400 12.5px/1.4 var(--font-sans)", color: "var(--fg-3)", marginTop: 2 }}>{u.jobTitle}</div>
-            <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
-              <RoleBadge role={u.role}/>
-              <PeopleStatusBadge status={u.status}/>
-              <SourceBadge source={u.source}/>
+      <aside style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 640, background: "var(--bg-app)", borderLeft: "1px solid var(--border)", zIndex: 41, display: "flex", flexDirection: "column", boxShadow: "var(--shadow-lg)" }}>
+        <div style={{ padding: "16px 20px 0", borderBottom: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 12, paddingBottom: 14 }}>
+            <Avatar name={u.name} size={44}/>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <h2 style={{ font: "600 17px/1.3 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>{u.name}</h2>
+              <div style={{ font: "400 12.5px/1.4 var(--font-sans)", color: "var(--fg-3)", marginTop: 2 }}>{u.jobTitle}</div>
+              <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <RoleBadge role={u.role}/>
+                <PeopleStatusBadge status={u.status}/>
+                <SourceBadge source={u.source}/>
+              </div>
+            </div>
+            <button className="btn btn-ghost btn-icon" onClick={onClose}><Icon name="x" size={14}/></button>
+          </div>
+          {/* Tab bar */}
+          <div style={{ display: "flex", gap: 4 }}>
+            {[
+              { id: "overview", label: "Overview" },
+              { id: "access",   label: "Access", count: visibleRows.length },
+            ].map(t => (
+              <button key={t.id} onClick={() => setTab(t.id)} style={{
+                padding: "10px 14px", marginBottom: -1, border: "none", background: "transparent",
+                color: tab === t.id ? "var(--fg-1)" : "var(--fg-3)",
+                font: "500 13px/1 var(--font-sans)",
+                borderBottom: `2px solid ${tab === t.id ? "var(--brand)" : "transparent"}`,
+                cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
+              }}>
+                {t.label}
+                {t.count != null && <span className={tab === t.id ? "badge badge-brand" : "badge"}>{t.count}</span>}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="scroll-area" style={{ flex: 1, overflow: "auto" }}>
+          {tab === "overview" && (
+            <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 22 }}>
+              <Section title="Profile">
+                <DetailRow k="Email">{u.email}</DetailRow>
+                <DetailRow k="Phone">{u.phone}</DetailRow>
+                <DetailRow k="Source"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><SourceBadge source={u.source}/>{u.source === "AD" && <span style={{ fontSize: 11.5, color: "var(--fg-4)" }}>Synced 4 hours ago</span>}</span></DetailRow>
+                <DetailRow k="Last login">{u.lastLogin}</DetailRow>
+                <DetailRow k="MFA"><span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}><MFABadge state={u.mfa}/>{u.mfa === "pending" && <a href="#" style={{ font: "500 12px/1 var(--font-sans)", color: "var(--brand-fg)" }}>Set up →</a>}</span></DetailRow>
+                <DetailRow k="Created">{u.createdOn}</DetailRow>
+                <DetailRow k="Login method">{u.login}</DetailRow>
+                <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
+                  <button className="btn btn-sm">Edit profile</button>
+                  {u.login !== "SSO" && <button className="btn btn-sm">Reset password</button>}
+                  <button className="btn btn-sm" style={{ color: u.status === "active" ? "var(--danger-fg)" : "var(--fg-2)" }}>{u.status === "active" ? "Disable user" : "Re-activate"}</button>
+                  <button className="btn btn-ghost btn-sm" style={{ color: "var(--danger-fg)" }}>Delete</button>
+                </div>
+              </Section>
+
+              <Section title="Role & Groups">
+                <div className="card" style={{ padding: 12, background: "var(--bg-surface-2)", marginBottom: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 6 }}>
+                    <div style={{ font: "600 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>Current role</div>
+                    <button className="btn btn-ghost btn-sm" style={{ color: "var(--brand-fg)" }}>Change role</button>
+                  </div>
+                  <div><RoleBadge role={u.role}/></div>
+                  <div style={{ marginTop: 8, font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>{(([...(window.SYSTEM_ROLES || []), ...(window.CUSTOM_ROLES || [])]).find(r => r.display === u.role) || {}).desc}</div>
+                </div>
+
+                <div style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-4)", marginBottom: 8 }}>Groups ({u.groups.length})</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {u.groups.map(g => {
+                    const grp = (window.PEOPLE_GROUPS || []).find(x => x.display === g) || { members: 0 };
+                    return (
+                      <div key={g} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 10px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-surface)" }}>
+                        <Icon name="people" size={13} color="var(--fg-3)"/>
+                        <span style={{ flex: 1, font: "500 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{g}</span>
+                        <span style={{ font: "400 11.5px/1 var(--font-sans)", color: "var(--fg-4)" }}>{grp.members} members</span>
+                        <button className="btn btn-ghost btn-icon btn-sm" style={{ color: "var(--danger-fg)" }} title="Remove from group"><Icon name="x" size={11}/></button>
+                      </div>
+                    );
+                  })}
+                  <button className="btn btn-sm" style={{ alignSelf: "flex-start" }}><Icon name="plus" size={11}/> Add to group</button>
+                </div>
+              </Section>
+
+              <Section title="Activity">
+                <div style={{ display: "flex", flexDirection: "column" }}>
+                  {[
+                    { ts: "Today 12:48", txt: "Session started on prod-db-01 using prod-db-root", icon: "play" },
+                    { ts: "Today 09:14", txt: "Access ticket approved for k8s-control-plane-aws by Arjun Bansal", icon: "check" },
+                    { ts: "Yesterday",    txt: "Added to group DevOps Team", icon: "people" },
+                    { ts: "5 days ago",   txt: "Role changed from End User to Operator by Arjun Bansal", icon: "shield" },
+                    { ts: u.createdOn,    txt: "User created via " + u.source, icon: "plus" },
+                  ].map((ev, i, arr) => (
+                    <div key={i} style={{ display: "flex", gap: 10, padding: "8px 0", position: "relative" }}>
+                      {i < arr.length - 1 && <div style={{ position: "absolute", left: 9, top: 24, bottom: -8, width: 1, background: "var(--border)" }}/>}
+                      <div style={{ width: 20, height: 20, borderRadius: "50%", background: "var(--bg-surface-2)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", zIndex: 1 }}>
+                        <Icon name={ev.icon} size={10} color="var(--fg-3)"/>
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ font: "500 12px/1.4 var(--font-sans)", color: "var(--fg-1)" }}>{ev.txt}</div>
+                        <div style={{ font: "400 11px/1 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>{ev.ts}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {u.id === "u-001" && <div style={{ marginTop: 10, padding: 10, background: "var(--success-soft)", borderRadius: 4, font: "500 12px/1.5 var(--font-sans)", color: "var(--success-fg)" }}>● 1 active session now — <a href="#" style={{ color: "var(--success-fg)", textDecoration: "underline" }}>View live sessions →</a></div>}
+                <a href="#" style={{ marginTop: 10, display: "inline-block", font: "500 12.5px/1 var(--font-sans)", color: "var(--brand-fg)" }}>View full audit trail →</a>
+              </Section>
+            </div>
+          )}
+
+          {tab === "access" && (
+            <PersonAccessTab
+              user={u}
+              onRevokeAll={() => setRevokeAllOpen(true)}
+              onRevokeRow={(row) => setRowRevoke(row)}
+            />
+          )}
+        </div>
+
+        {revokeAllOpen && (
+          <PersonRevokeAllModal
+            user={u}
+            rows={visibleRows}
+            onClose={() => setRevokeAllOpen(false)}
+            onConfirm={() => {
+              setRevoked(new Set(visibleRows.map(r => r.id)));
+              setRevokeAllOpen(false);
+              setToast({ text: `All access revoked for ${u.name}.` });
+            }}
+          />
+        )}
+
+        {rowRevoke && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setRowRevoke(null)}>
+            <div style={{ width: 460, background: "var(--bg-app)", borderRadius: 10, boxShadow: "0 24px 64px rgba(0,0,0,0.25)" }} onClick={e => e.stopPropagation()}>
+              <div style={{ padding: 20, borderBottom: "1px solid var(--border)" }}>
+                <h2 style={{ font: "600 15px/1.3 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Revoke access?</h2>
+                <div style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>{u.name} → {rowRevoke.resource}</div>
+              </div>
+              <div style={{ padding: 20, font: "400 13px/1.5 var(--font-sans)", color: "var(--fg-2)" }}>
+                This immediately removes {u.name.split(" ")[0]}'s access to <strong>{rowRevoke.resource}</strong>.
+                {rowRevoke.activeSession && <div style={{ marginTop: 10, padding: 10, background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 6, font: "500 12px/1.5 var(--font-sans)" }}>Active session on {rowRevoke.resource} will be disconnected immediately.</div>}
+              </div>
+              <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end", gap: 8, background: "var(--bg-surface)" }}>
+                <button className="btn" onClick={() => setRowRevoke(null)}>Cancel</button>
+                <button className="btn" onClick={() => { setRevoked(prev => { const n = new Set(prev); n.add(rowRevoke.id); return n; }); setToast({ text: `Access to ${rowRevoke.resource} revoked.` }); setRowRevoke(null); }} style={{ background: "var(--danger)", color: "#fff", borderColor: "transparent" }}>Revoke access</button>
+              </div>
             </div>
           </div>
-          <button className="btn btn-ghost btn-icon" onClick={onClose}><Icon name="x" size={14}/></button>
-        </div>
+        )}
 
-        <div className="scroll-area" style={{ flex: 1, overflow: "auto", padding: 20, display: "flex", flexDirection: "column", gap: 22 }}>
-
-          <Section title="Profile">
-            <DetailRow k="Email">{u.email}</DetailRow>
-            <DetailRow k="Phone">{u.phone}</DetailRow>
-            <DetailRow k="Source"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><SourceBadge source={u.source}/>{u.source === "AD" && <span style={{ fontSize: 11.5, color: "var(--fg-4)" }}>Synced 4 hours ago</span>}</span></DetailRow>
-            <DetailRow k="Last login">{u.lastLogin}</DetailRow>
-            <DetailRow k="MFA"><span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}><MFABadge state={u.mfa}/>{u.mfa === "pending" && <a href="#" style={{ font: "500 12px/1 var(--font-sans)", color: "var(--brand-fg)" }}>Set up →</a>}</span></DetailRow>
-            <DetailRow k="Created">{u.createdOn}</DetailRow>
-            <DetailRow k="Login method">{u.login}</DetailRow>
-            <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
-              <button className="btn btn-sm">Edit profile</button>
-              {u.login !== "SSO" && <button className="btn btn-sm">Reset password</button>}
-              <button className="btn btn-sm" style={{ color: u.status === "active" ? "var(--danger-fg)" : "var(--fg-2)" }}>{u.status === "active" ? "Disable user" : "Re-activate"}</button>
-              <button className="btn btn-ghost btn-sm" style={{ color: "var(--danger-fg)" }}>Delete</button>
-            </div>
-          </Section>
-
-          <Section title="Role & Groups">
-            <div className="card" style={{ padding: 12, background: "var(--bg-surface-2)", marginBottom: 12 }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 6 }}>
-                <div style={{ font: "600 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>Current role</div>
-                <button className="btn btn-ghost btn-sm" style={{ color: "var(--brand-fg)" }}>Change role</button>
-              </div>
-              <div><RoleBadge role={u.role}/></div>
-              <div style={{ marginTop: 8, font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>{(([...(window.SYSTEM_ROLES || []), ...(window.CUSTOM_ROLES || [])]).find(r => r.display === u.role) || {}).desc}</div>
-            </div>
-
-            <div style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-4)", marginBottom: 8 }}>Groups ({u.groups.length})</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {u.groups.map(g => {
-                const grp = (window.PEOPLE_GROUPS || []).find(x => x.display === g) || { members: 0 };
-                return (
-                  <div key={g} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 10px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-surface)" }}>
-                    <Icon name="people" size={13} color="var(--fg-3)"/>
-                    <span style={{ flex: 1, font: "500 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{g}</span>
-                    <span style={{ font: "400 11.5px/1 var(--font-sans)", color: "var(--fg-4)" }}>{grp.members} members</span>
-                    <button className="btn btn-ghost btn-icon btn-sm" style={{ color: "var(--danger-fg)" }} title="Remove from group"><Icon name="x" size={11}/></button>
-                  </div>
-                );
-              })}
-              <button className="btn btn-sm" style={{ alignSelf: "flex-start" }}><Icon name="plus" size={11}/> Add to group</button>
-            </div>
-          </Section>
-
-          <Section title={`Resource access (${accessRows.length})`}>
-            <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)", marginBottom: 10 }}>
-              {accessRows.length} resources — <strong style={{ color: "var(--fg-2)" }}>{accessRows.filter(r => r.via === "Direct").length} direct</strong>, <strong style={{ color: "var(--fg-2)" }}>{accessRows.filter(r => r.via.startsWith("Via Group")).length} via groups</strong>, <strong style={{ color: "var(--fg-2)" }}>{accessRows.filter(r => r.via.startsWith("Via Role")).length} via role</strong>
-            </div>
-            <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
-              {["All","Direct","Via Group","Active","Expiring"].map(f => (
-                <button key={f} onClick={() => setAccessFilter(f)} style={{
-                  padding: "4px 10px", border: "none", borderRadius: 4, cursor: "pointer",
-                  background: accessFilter === f ? "var(--brand-soft)" : "var(--bg-surface-2)",
-                  color: accessFilter === f ? "var(--brand-fg)" : "var(--fg-3)",
-                  font: "500 11.5px/1 var(--font-sans)",
-                }}>{f}</button>
-              ))}
-            </div>
-            <table className="table" style={{ border: "1px solid var(--border)", borderRadius: 6 }}>
-              <thead><tr><th>Resource</th><th>Env</th><th>Access</th><th>Window</th><th>Status</th></tr></thead>
-              <tbody>{filtered.map((r, i) => (
-                <tr key={i}>
-                  <td><div className="row"><Icon name={r.type === "database" ? "database" : r.type === "cloud" ? "cloud" : "server"} size={12} color="var(--fg-3)"/><span className="t-mono" style={{ fontSize: 12, color: "var(--brand-fg)", fontWeight: 500 }}>{r.res}</span></div></td>
-                  <td><span className="badge" style={{ textTransform: "capitalize" }}>{r.env}</span></td>
-                  <td className="t-tiny" style={{ color: r.via.startsWith("Via Group") ? "var(--brand-fg)" : r.via.startsWith("Via Role") ? "var(--warning-fg)" : "var(--fg-2)" }}>{r.via}</td>
-                  <td className="t-tiny" style={{ color: r.status === "Expiring" ? "var(--warning-fg)" : "var(--fg-3)" }}>{r.window}</td>
-                  <td>
-                    {r.status === "Active"   && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, font: "500 11.5px/1 var(--font-sans)", color: "var(--success-fg)" }}><span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--success-fg)" }}/>Active</span>}
-                    {r.status === "Expiring" && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, font: "500 11.5px/1 var(--font-sans)", color: "var(--warning-fg)" }}><span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--warning-fg)" }}/>Expiring</span>}
-                    {r.status === "Expired"  && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, font: "500 11.5px/1 var(--font-sans)", color: "var(--fg-4)" }}><span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--fg-4)" }}/>Expired</span>}
-                  </td>
-                </tr>
-              ))}</tbody>
-            </table>
-          </Section>
-
-          <Section title="Activity">
-            <div style={{ display: "flex", flexDirection: "column" }}>
-              {[
-                { ts: "Today 12:48", txt: "Session started on prod-db-01 using prod-db-root", icon: "play" },
-                { ts: "Today 09:14", txt: "Access ticket approved for k8s-control-plane-aws by Arjun Bansal", icon: "check" },
-                { ts: "Yesterday",    txt: "Added to group DevOps Team", icon: "people" },
-                { ts: "5 days ago",   txt: "Role changed from End User to Operator by Arjun Bansal", icon: "shield" },
-                { ts: u.createdOn,    txt: "User created via " + u.source, icon: "plus" },
-              ].map((ev, i, arr) => (
-                <div key={i} style={{ display: "flex", gap: 10, padding: "8px 0", position: "relative" }}>
-                  {i < arr.length - 1 && <div style={{ position: "absolute", left: 9, top: 24, bottom: -8, width: 1, background: "var(--border)" }}/>}
-                  <div style={{ width: 20, height: 20, borderRadius: "50%", background: "var(--bg-surface-2)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", zIndex: 1 }}>
-                    <Icon name={ev.icon} size={10} color="var(--fg-3)"/>
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ font: "500 12px/1.4 var(--font-sans)", color: "var(--fg-1)" }}>{ev.txt}</div>
-                    <div style={{ font: "400 11px/1 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>{ev.ts}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-            {u.id === "u-001" && <div style={{ marginTop: 10, padding: 10, background: "var(--success-soft)", borderRadius: 4, font: "500 12px/1.5 var(--font-sans)", color: "var(--success-fg)" }}>● 1 active session now — <a href="#" style={{ color: "var(--success-fg)", textDecoration: "underline" }}>View live sessions →</a></div>}
-            <a href="#" style={{ marginTop: 10, display: "inline-block", font: "500 12.5px/1 var(--font-sans)", color: "var(--brand-fg)" }}>View full audit trail →</a>
-          </Section>
-        </div>
+        {toast && (
+          <div style={{ position: "fixed", bottom: 24, right: 24, zIndex: 300, padding: "12px 18px", background: "var(--fg-1)", color: "var(--bg-app)", borderRadius: 6, font: "500 12.5px/1.5 var(--font-sans)", boxShadow: "0 12px 32px rgba(0,0,0,0.25)", display: "flex", alignItems: "center", gap: 10 }}>
+            <Icon name="check-circle" size={13} color="var(--success)"/>
+            {toast.text}
+            <button style={{ background: "transparent", border: "none", color: "var(--bg-app)", cursor: "pointer", padding: 0, display: "flex" }} onClick={() => setToast(null)}><Icon name="x" size={11}/></button>
+          </div>
+        )}
       </aside>
     </>
   );
