@@ -2,9 +2,10 @@
 
 const CRED_TYPE_BADGE = ({ type }) => {
   const m = {
-    "Password":   { fg: "var(--brand-fg)",  bg: "var(--brand-soft)" },
-    "SSH Key":    { fg: "var(--fg-2)",      bg: "var(--bg-surface-2)" },
-    "App Secret": { fg: "var(--fg-2)",      bg: "var(--bg-surface-2)" },
+    "Password":       { fg: "var(--brand-fg)",  bg: "var(--brand-soft)" },
+    "SSH Key":        { fg: "var(--fg-2)",      bg: "var(--bg-surface-2)" },
+    "App Secret":     { fg: "var(--fg-2)",      bg: "var(--bg-surface-2)" },
+    "Certificate":    { fg: "var(--info-fg)",   bg: "var(--info-soft)" },
     "Reconciliation": { fg: "var(--warning-fg)", bg: "var(--warning-soft)" },
   }[type] || { fg: "var(--fg-2)", bg: "var(--bg-surface-2)" };
   return <span style={{ padding: "2px 8px", borderRadius: 999, font: "500 11px/1.5 var(--font-sans)", background: m.bg, color: m.fg, whiteSpace: "nowrap" }}>{type}</span>;

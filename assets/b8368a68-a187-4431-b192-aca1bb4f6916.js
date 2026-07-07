@@ -277,11 +277,30 @@ const AppSecretsTab = ({ onOpen, onAdd }) => {
 // =========================================================
 const ReconciliationTab = () => {
   const [dismissed, setDismissed] = React.useState(false);
-  const recons = window.RECON_CREDS || [];
+  const [pendingDismissed, setPendingDismissed] = React.useState(false);
   const [openRecon, setOpenRecon] = React.useState(null);
   const [deleteRecon, setDeleteRecon] = React.useState(null);
   const [addOpen, setAddOpen] = React.useState(false);
   const [auditId, setAuditId] = React.useState(null);
+  // Fix 5 — Cloud reconciliation type. aws-iam-*/azure-service-principal-* are
+  // being rotated, but no cloud-type reconciliation account exists in the seed
+  // data. Rather than invent a placeholder account name (a security-integrity
+  // issue), we merge in an honest-copy row noting the mechanism sits outside
+  // PAM's reconciliation model until engineering confirms otherwise. The
+  // banner above the table flags this as a backend dependency.
+  const seed = window.RECON_CREDS || [];
+  const hasCloud = seed.some(r => r.type === "Cloud");
+  const cloudPlaceholder = hasCloud ? null : {
+    id: "rc-cloud",
+    display: "aws-secrets-manager (external)",
+    type: "Cloud",
+    username: "Cloud-native — AWS Secrets Manager",
+    resources: 2,
+    lastUsed: "External — not tracked by PAM",
+    status: "External",
+    external: true,
+  };
+  const recons = cloudPlaceholder ? [...seed, cloudPlaceholder] : seed;
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "auto" }}>
       {!dismissed && (
@@ -299,6 +318,22 @@ const ReconciliationTab = () => {
         </div>
       )}
 
+      {/* Fix 5 — Cloud reconciliation type. Backend dependency banner. Removed
+          only once engineering confirms which mechanism actually rotates the
+          aws-iam-* / azure-service-principal-* credentials. Design intentionally
+          renders the Cloud row with placeholder-honest copy ("Cloud-native —
+          AWS Secrets Manager") rather than inventing a PAM-managed account
+          name — the difference matters for a security review. */}
+      {!pendingDismissed && cloudPlaceholder && (
+        <div style={{ margin: "12px 24px 0", padding: 12, background: "var(--warning-soft)", borderRadius: 8, display: "flex", gap: 10, alignItems: "flex-start" }}>
+          <Icon name="alert-circle" size={14} color="var(--warning-fg)" style={{ marginTop: 2 }}/>
+          <div style={{ flex: 1, font: "400 12.5px/1.5 var(--font-sans)", color: "var(--warning-fg)" }}>
+            <strong>Cloud reconciliation — pending engineering confirmation.</strong> The Cloud row below reflects what appears to be an external rotation mechanism (AWS Secrets Manager). Until the actual mechanism is confirmed, this row is a placeholder — do not treat its counts as PAM-authoritative.
+          </div>
+          <button className="btn btn-ghost btn-icon btn-sm" onClick={() => setPendingDismissed(true)}><Icon name="x" size={11}/></button>
+        </div>
+      )}
+
       <div style={{ padding: "14px 24px 8px", display: "flex", alignItems: "center" }}>
         <div style={{ flex: 1, font: "500 12.5px/1 var(--font-sans)", color: "var(--fg-3)" }}>{recons.length} reconciliation credentials</div>
         <button className="btn btn-primary btn-sm" onClick={() => setAddOpen(true)}><Icon name="plus" size={11}/> Add reconciliation credential</button>
@@ -312,16 +347,24 @@ const ReconciliationTab = () => {
           <table className="table">
             <thead><tr><th>Display name</th><th>Type</th><th>Username</th><th>Resources rotated</th><th>Last used for rotation</th><th>Status</th><th></th></tr></thead>
             <tbody>{recons.map(rc => (
-              <tr key={rc.id} onClick={() => setOpenRecon(rc)} style={{ cursor: "pointer" }}>
-                <td><div style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--brand-fg)" }}>{rc.display}</div></td>
+              <tr key={rc.id} onClick={() => !rc.external && setOpenRecon(rc)} style={{ cursor: rc.external ? "default" : "pointer" }}>
+                <td>
+                  <div style={{ font: "500 13px/1.3 var(--font-sans)", color: rc.external ? "var(--fg-2)" : "var(--brand-fg)" }}>{rc.display}</div>
+                  {rc.external && <div style={{ font: "400 11px/1.3 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>Rotated outside PAM</div>}
+                </td>
                 <td><span className="badge">{rc.type}</span></td>
-                <td><MaskedField value={rc.username}/></td>
+                <td>
+                  {rc.external
+                    ? <span style={{ font: "400 12px/1.4 var(--font-sans)", color: "var(--fg-3)" }}>{rc.username}</span>
+                    : <MaskedField value={rc.username}/>}
+                </td>
                 <td style={{ color: "var(--fg-2)", fontSize: 12.5 }}>{rc.resources} resources</td>
-                <td className="t-tiny" style={{ color: rc.status === "Failed" ? "var(--danger-fg)" : "var(--fg-3)" }}>{rc.lastUsed}</td>
+                <td className="t-tiny" style={{ color: rc.status === "Failed" ? "var(--danger-fg)" : rc.external ? "var(--fg-4)" : "var(--fg-3)", fontStyle: rc.external ? "italic" : "normal" }}>{rc.lastUsed}</td>
                 <td>
                   {rc.status === "Active"  && <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "500 12px/1 var(--font-sans)", color: "var(--success-fg)" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--success-fg)" }}/>Active</span>}
                   {rc.status === "Failed"  && <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "500 12px/1 var(--font-sans)", color: "var(--danger-fg)" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--danger-fg)" }}/>Failed</span>}
                   {rc.status === "Untested"&& <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "500 12px/1 var(--font-sans)", color: "var(--fg-3)" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--fg-4)" }}/>Untested</span>}
+                  {rc.status === "External"&& <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "500 12px/1 var(--font-sans)", color: "var(--warning-fg)" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--warning-fg)" }}/>External · pending confirmation</span>}
                 </td>
                 <td onClick={e => e.stopPropagation()} style={{ textAlign: "right" }}><RowMenu items={[
                   { label: "Edit", icon: "edit", onClick: () => setOpenRecon(rc) },

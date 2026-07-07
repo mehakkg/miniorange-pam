@@ -165,6 +165,28 @@ const CredentialDetailPanel = ({ credId, startEdit, onClose, onRotate, onDrift, 
         </div>
 
         <div className="scroll-area" style={{ flex: 1, overflow: "auto", padding: 20, display: "flex", flexDirection: "column", gap: 22 }}>
+          {/* Fix 6 — Certificate link-out. PAM stores only the reference; the
+              certificate lifecycle (issuance / renewal / expiry) lives in the
+              Certificates section. Do not duplicate that data here. */}
+          {c.type === "Certificate" && (
+            <div style={{ padding: 14, background: "var(--info-soft)", borderRadius: 8, display: "flex", gap: 12, alignItems: "flex-start" }}>
+              <div style={{ width: 32, height: 32, borderRadius: 6, background: "var(--bg-app)", color: "var(--info-fg)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
+                <Icon name="shield" size={16}/>
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ font: "600 13.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>Certificate reference — managed in Certificates</div>
+                <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-2)", marginTop: 3 }}>
+                  This credential row is a reference to a certificate. Issuance, renewal, and expiry are managed in the Certificates section.
+                  {c.certRef && <span> Reference: <span className="t-mono" style={{ fontSize: 11.5 }}>{c.certRef}</span></span>}
+                  {c.certExpiry && <span> · Expires {c.certExpiry}.</span>}
+                </div>
+              </div>
+              <a href="#" onClick={e => e.preventDefault()} className="btn btn-primary btn-sm" style={{ flexShrink: 0, whiteSpace: "nowrap" }}>
+                View certificate <Icon name="chevron-right" size={11} color="#fff"/>
+              </a>
+            </div>
+          )}
+
           <DetailSection title="Identity">
             {editing ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>

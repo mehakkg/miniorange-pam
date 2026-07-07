@@ -3,7 +3,7 @@
 const CredentialsV2 = ({ empty }) => {
   const [tab, setTab] = React.useState("all");
   const [q, setQ] = React.useState("");
-  const [filters, setFilters] = React.useState({ nature: "Any", ownership: "Any", mgmt: "Any", status: "Any", resource: "Any", owner: "Any" });
+  const [filters, setFilters] = React.useState({ nature: "Any", source: "Any", ownership: "Any", mgmt: "Any", status: "Any", resource: "Any", owner: "Any" });
   const [selected, setSelected] = React.useState(new Set());
   const [openId, setOpenId] = React.useState(null);
   const [showAdd, setShowAdd] = React.useState(false);
@@ -37,6 +37,12 @@ const CredentialsV2 = ({ empty }) => {
   const ALL_COLS = [
     { id: "name",       label: "Display name",   required: true },
     { id: "type",       label: "Type",           required: false },
+    // SOURCE column — where the credential's identity actually lives. Sits
+    // immediately after TYPE so a Password + Local OS row and a Password +
+    // Active Directory row read as distinct without the admin cross-checking
+    // the display name. Independent of Type; may coincide with Type for
+    // Cloud-IAM rows (that's expected, do not merge/hide the column there).
+    { id: "source",     label: "Source",         required: false },
     { id: "username",   label: "Username",       required: false },
     { id: "resources",  label: "Resources",      required: false },
     { id: "owner",      label: "Owner",          required: false },
@@ -65,15 +71,40 @@ const CredentialsV2 = ({ empty }) => {
     if (/^(aws|azure|gcp)-/i.test(c.display || "") || (c.tags || []).includes("cloud-iam")) return "Cloud-IAM";
     return "Password";
   };
-  // Ownership — Individual = has a human owner. Non-human = service account
-  // display starting with svc- / bot- / integration name. Shared = no owner
-  // assigned OR generic name like root-*.
+  // Ownership — Individual = has a human owner. Non-human = service account,
+  // App Secret (structurally tied to a service, not a person), or matches a
+  // non-human naming pattern. Shared = no owner + generic name like root-*.
+  //
+  // Backend dependency (flagged in the fix spec): once discovery / provisioning
+  // pipelines tag ownership properly at write-time, this helper should be a
+  // no-op reading c.ownership directly. Until then it derives from Type + name
+  // heuristics so the Ownership strip and Application Secrets tab agree.
   const ownershipOf = (c) => {
-    if (/^(svc|bot|integration)-/i.test(c.display || "")) return "Non-human";
+    if (c.type === "App Secret") return "Non-human";
+    if (/^(svc|bot|integration|dev-api|oauth|db-conn|api-key)-/i.test(c.display || "")) return "Non-human";
+    if (/-key$|-token$|-secret$/i.test(c.display || "")) return "Non-human";
     if (!c.owner || /^root/i.test(c.display || "")) return "Shared";
     return "Individual";
   };
-  // Management state — how PAM handles the cred lifecycle.
+  // Source — where the credential's identity actually lives. Independent of
+  // Type: a Password can have Source=Local OS or Source=Active Directory, and
+  // both must render distinctly in the SOURCE column.
+  //
+  // Note: c.source in existing seed data means "discovery source" (Manual /
+  // Discovery / AD Scan) — different axis. We honor c.identitySource if the
+  // backend ships that field, otherwise derive from Type + name heuristics.
+  const sourceOf = (c) => {
+    if (c.identitySource) return c.identitySource;
+    const d = (c.display || "").toLowerCase();
+    if (/^(aws|azure|gcp|eks|iam)-/.test(d) || c.type === "Cloud-IAM" || natureOf(c) === "Cloud-IAM") return "Cloud-IAM";
+    if (/(^ad-|-ad$|active-directory|ldap|kerberos)/.test(d) || c.source === "AD Scan") return "Active Directory";
+    if (/(oauth|slack|stripe|zoom|salesforce|okta|azuread|-saas)/.test(d)) return "SaaS";
+    return "Local OS";
+  };
+  // Management state — how PAM handles the cred lifecycle. Reconciliation and
+  // Break-glass are removed from the dropdown (see Fix 4) because both already
+  // have dedicated tabs with full stat context; the helper still detects them
+  // to keep tab routing / chip rendering elsewhere consistent.
   const mgmtOf = (c) => {
     if ((c.tags || []).includes("break-glass")) return "Break-glass";
     if ((c.tags || []).includes("reconciliation") || /reconciliation/i.test(c.display || "")) return "Reconciliation";
@@ -82,6 +113,7 @@ const CredentialsV2 = ({ empty }) => {
     return "Vaulted-Managed";
   };
   if (filters.nature !== "Any")     rows = rows.filter(c => natureOf(c) === filters.nature);
+  if (filters.source !== "Any")     rows = rows.filter(c => sourceOf(c) === filters.source);
   if (filters.ownership !== "Any")  rows = rows.filter(c => ownershipOf(c) === filters.ownership);
   if (filters.mgmt !== "Any")       rows = rows.filter(c => mgmtOf(c) === filters.mgmt);
   if (filters.status === "Healthy")  rows = rows.filter(c => c.rotation === "healthy");
@@ -231,8 +263,20 @@ const CredentialsV2 = ({ empty }) => {
                 would just be All-Credentials filtered by Type=X with no additional
                 computed context, keep it dropdown-only — no tab. */}
             <FilterDropdown label="Type"             value={filters.nature}    onChange={v => setFilters({...filters, nature: v})}    options={[["Any","Any"],["SSH Key","SSH Key"],["App Secret","App Secret"],["Cloud-IAM","Cloud-IAM"],["Password","Password"],["Certificate reference","Certificate"]]}/>
-            <FilterDropdown label="Ownership"        value={filters.ownership} onChange={v => setFilters({...filters, ownership: v})} options={[["Any","Any"],["Individual","Individual"],["Shared","Shared"],["Non-human","Non-human"]]}/>
-            <FilterDropdown label="Management state" value={filters.mgmt}      onChange={v => setFilters({...filters, mgmt: v})}      options={[["Any","Any"],["Vaulted-Managed","Vaulted-Managed"],["Ad-hoc-Unmanaged","Ad-hoc-Unmanaged"],["Federated-SSO","Federated-SSO"],["Reconciliation","Reconciliation"],["Break-glass","Break-glass"]]}/>
+            {/* Source axis — independent of Type. A Password can live in Local OS or
+                Active Directory; both render distinctly in the SOURCE column. No
+                dedicated tab: Source has no distinct computed metric (no "stale," no
+                "orphaned") that would justify a stat header. */}
+            <FilterDropdown label="Source"           value={filters.source}    onChange={v => setFilters({...filters, source: v})}    options={[["Any","Any"],["Local OS","Local OS"],["Active Directory","Active Directory"],["Cloud-IAM","Cloud-IAM"],["SaaS","SaaS"]]}/>
+            {/* Ownership dropdown removed — the Ownership breakdown strip above the
+                filter row is now the sole control for this axis. Two controls, one
+                axis was duplication. */}
+            {/* Management state — trimmed to three non-duplicated options. Reconciliation
+                and Break-glass were removed because both already have dedicated tabs with
+                full stat context; a filtered rowset on All Credentials is a strictly worse
+                version of those views. If an admin wants those credentials, the tab is the
+                correct destination. */}
+            <FilterDropdown label="Management state" value={filters.mgmt}      onChange={v => setFilters({...filters, mgmt: v})}      options={[["Any","Any"],["Vaulted-Managed","Vaulted-Managed"],["Ad-hoc-Unmanaged","Ad-hoc-Unmanaged"],["Federated-SSO","Federated-SSO"]]}/>
             <FilterDropdown label="Status"           value={filters.status}    onChange={v => setFilters({...filters, status: v})}    options={[["Any","Any"],["Healthy","Healthy"],["Overdue","Overdue"],["Failed","Failed"],["Drifted","Drifted"],["No policy","No policy"]]}/>
             <FilterDropdown label="Resource"         value={filters.resource}  onChange={v => setFilters({...filters, resource: v})}  options={[["Any","Any"],["prod-db-01","prod-db-01"],["ssh-server-linux","ssh-server-linux"]]}/>
             <FilterDropdown label="Owner"            value={filters.owner}     onChange={v => setFilters({...filters, owner: v})}     options={[["Any","Any"],["Arjun Bansal","Arjun Bansal"],["Priya Nair","Priya Nair"]]}/>
@@ -272,7 +316,7 @@ const CredentialsV2 = ({ empty }) => {
           {activeChips.length > 0 && (
             <div style={{ padding: "8px 24px", borderBottom: "1px solid var(--border-subtle)", display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
               {activeChips.map(([k, v]) => <ChipFilter key={k} label={`${k}: ${v}`} onRemove={() => setFilters({...filters, [k]: "Any"})}/>)}
-              <button className="btn btn-ghost btn-sm" style={{ padding: "2px 10px", color: "var(--fg-3)" }} onClick={() => setFilters({ nature: "Any", ownership: "Any", mgmt: "Any", status: "Any", resource: "Any", owner: "Any" })}>Clear all</button>
+              <button className="btn btn-ghost btn-sm" style={{ padding: "2px 10px", color: "var(--fg-3)" }} onClick={() => setFilters({ nature: "Any", source: "Any", ownership: "Any", mgmt: "Any", status: "Any", resource: "Any", owner: "Any" })}>Clear all</button>
             </div>
           )}
 
@@ -308,6 +352,7 @@ const CredentialsV2 = ({ empty }) => {
                   <th style={{ width: 32 }}><input type="checkbox" checked={allChecked} onChange={toggleAll} style={{ accentColor: "var(--brand)" }}/></th>
                   {show("name")        && <th>Display name</th>}
                   {show("type")        && <th>Type</th>}
+                  {show("source")      && <th>Source</th>}
                   {show("username")    && <th>Username</th>}
                   {show("resources")   && <th>Resources</th>}
                   {show("owner")       && <th>Owner</th>}
@@ -324,6 +369,11 @@ const CredentialsV2 = ({ empty }) => {
                     <td onClick={e => e.stopPropagation()}><input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleSel(c.id)} style={{ accentColor: "var(--brand)" }}/></td>
                     {show("name")        && <td><span style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--brand-fg)" }}>{c.display}</span></td>}
                     {show("type")        && <td><CRED_TYPE_BADGE type={c.type}/></td>}
+                    {show("source")      && (() => {
+                      const s = sourceOf(c);
+                      const iconMap = { "Local OS": "server", "Active Directory": "people", "Cloud-IAM": "cloud", "SaaS": "web" };
+                      return <td><span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "500 12.5px/1 var(--font-sans)", color: "var(--fg-2)" }}><Icon name={iconMap[s] || "lock"} size={12} color="var(--fg-3)"/> {s}</span></td>;
+                    })()}
                     {show("username")    && <td>{c.username === "—" ? <span style={{ color: "var(--fg-4)" }}>—</span> : <MaskedField value={c.username}/>}</td>}
                     {show("resources")   && <td><span style={{ padding: "2px 8px", borderRadius: 999, background: "var(--bg-surface-2)", font: "500 11.5px/1.5 var(--font-sans)", color: "var(--fg-2)" }} title={c.resources.join(", ")}>{c.resources.length} resource{c.resources.length === 1 ? "" : "s"}</span></td>}
                     {show("owner")       && <td>{c.owner ? <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Avatar name={c.owner} size={20}/><span style={{ fontSize: 12.5 }}>{c.owner}</span></span> : <span style={{ color: "var(--fg-4)", fontSize: 12.5 }}>Unassigned</span>}</td>}
@@ -332,9 +382,18 @@ const CredentialsV2 = ({ empty }) => {
                     {show("adminAcct")   && <td className="t-tiny" style={{ color: c.adminAcct ? "var(--fg-2)" : "var(--fg-4)" }}>{c.adminAcct || "Not set"}</td>}
                     {show("policy")      && <td className="t-tiny" style={{ color: c.policy ? "var(--fg-2)" : "var(--fg-4)" }}>{c.policy || "None"}</td>}
                     {show("lastRotated") && <td className="t-tiny" style={{ color: c.lastRotated === "Never" ? "var(--fg-4)" : c.rotation === "failed" || c.rotation === "drifted" ? "var(--danger-fg)" : "var(--fg-3)" }}>{c.lastRotated}</td>}
-                    {show("status")      && <td><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><RotationDot status={c.rotation}/><span style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-2)" }}>{c.rotation === "healthy" ? "Healthy" : c.rotation === "overdue" ? "Overdue" : c.rotation === "failed" ? "Failed" : c.rotation === "drifted" ? "Drifted" : "No policy"}</span></span></td>}
+                    {show("status")      && <td>
+                      {c.type === "Certificate"
+                        ? <span style={{ font: "400 12px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>Managed in Certificates</span>
+                        : <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><RotationDot status={c.rotation}/><span style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-2)" }}>{c.rotation === "healthy" ? "Healthy" : c.rotation === "overdue" ? "Overdue" : c.rotation === "failed" ? "Failed" : c.rotation === "drifted" ? "Drifted" : "No policy"}</span></span>}
+                    </td>}
                     <td onClick={e => e.stopPropagation()} style={{ textAlign: "right" }}>
-                      {testingId === c.id ? <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "500 11.5px/1 var(--font-sans)", color: "var(--fg-3)" }}><Spinner size={12}/> Testing…</span>
+                      {/* Fix 6 — Certificate rows link out to /certificates. Certificate
+                          lifecycle (issuance / renewal / expiry) lives entirely in the
+                          Certificates section; this row is just a reference. */}
+                      {c.type === "Certificate"
+                        ? <a href="#" onClick={e => e.preventDefault()} style={{ font: "500 12.5px/1 var(--font-sans)", color: "var(--brand-fg)", display: "inline-flex", alignItems: "center", gap: 4, padding: "6px 8px" }}>View certificate <Icon name="chevron-right" size={11} color="var(--brand-fg)"/></a>
+                       : testingId === c.id ? <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "500 11.5px/1 var(--font-sans)", color: "var(--fg-3)" }}><Spinner size={12}/> Testing…</span>
                        : c.rotation === "drifted" ? <button className="btn btn-sm" onClick={() => setDriftId(c.id)}>Reconcile</button> : <RowMenu items={[
                         { label: "Edit", icon: "edit", onClick: () => { setEditId(c.id); setOpenId(c.id); } },
                         { label: "Rotate now", icon: "refresh", disabled: !c.adminAcct, onClick: () => setRotateId(c.id) },

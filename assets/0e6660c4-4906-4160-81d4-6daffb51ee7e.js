@@ -11,6 +11,15 @@ const CREDS = [
   { id: "c-009", display: "oauth-token-zoom",    type: "App Secret", username: "—", resources: [], owner: "Priya Nair", sensitivity: "Medium", nonViewable: true, adminAcct: null, policy: null, lastRotated: "112 days ago", rotation: "overdue", source: "Manual", created: "Nov 19, 2025", complete: true, tags: ["oauth"], secretType: "OAuth Token", application: "Zoom Webhook", expiry: "2026-05-26", injection: "Config File" },
   { id: "c-010", display: "db-conn-warehouse",   type: "App Secret", username: "—", resources: ["audit-readonly-replica"], owner: "Rohan Mehta", sensitivity: "High", nonViewable: false, adminAcct: null, policy: null, lastRotated: "Never", rotation: "no-policy", source: "CSV Import", created: "Apr 28, 2026", complete: false, tags: [], secretType: "DB Connection String", application: "Warehouse ETL", expiry: null, injection: "API Call" },
   { id: "c-011", display: "k8s-cluster-admin",   type: "Password", username: "cluster-admin", resources: ["k8s-control-plane-aws"], owner: "Arjun Bansal", sensitivity: "Critical", nonViewable: true, adminAcct: "k8s-recon", policy: "Prod-Daily-Rotation", lastRotated: "Drifted", rotation: "drifted",  source: "Manual", created: "Feb 02, 2026", complete: true, tags: ["k8s","aws","kubernetes"], driftReason: "Password on k8s-control-plane-aws does not match vault — likely changed by an admin directly on the cluster. Last vault sync: 4 days ago." },
+  // Certificate reference — links out to /certificates; PAM stores only the
+  // reference. Added so the Certificate link-out is visible in the demo.
+  { id: "c-012", display: "web-tls-kestrel-io",  type: "Certificate", username: "—", resources: ["kestrel-admin-portal","stripe-webhook-relay"], owner: "Arjun Bansal", sensitivity: "High", nonViewable: false, adminAcct: null, policy: null, lastRotated: "—", rotation: "no-policy", source: "Manual", created: "Feb 12, 2026", complete: true, tags: ["cert","tls"], certRef: "cert-kestrel-io-2026", certExpiry: "Feb 11, 2027" },
+  // Cloud-IAM sub-account — SOURCE=Cloud-IAM for the "Type + Source coincide"
+  // case called out in the spec.
+  { id: "c-013", display: "aws-iam-devops",      type: "Password", username: "iam-devops", resources: ["k8s-control-plane-aws"], owner: "Priya Nair", sensitivity: "High", nonViewable: true, adminAcct: null, policy: "SSH-Weekly-Maintenance-Window", lastRotated: "12 days ago", rotation: "healthy", source: "Manual", created: "Mar 04, 2026", complete: true, tags: ["cloud","aws","iam"] },
+  // AD-linked account — SOURCE=Active Directory so the SOURCE column shows
+  // Local OS + AD + Cloud-IAM side by side in the demo.
+  { id: "c-014", display: "ad-reconciliation-linked-account", type: "Password", username: "svc.pam.rotate", resources: ["ssh-server-linux"], owner: "Arjun Bansal", sensitivity: "High", nonViewable: true, adminAcct: null, policy: "Prod-Daily-Rotation", lastRotated: "4 days ago", rotation: "healthy", source: "AD Scan", created: "Jan 08, 2026", complete: true, tags: ["ad","reconciliation"] },
 ];
 
 const RECON_CREDS = [
