@@ -160,13 +160,77 @@ const CredentialsV2 = ({ empty }) => {
             <KPICard label="No policy set"     value={counts.noPolicy} accent="var(--fg-3)"      active={filters.status === "No policy"} onClick={() => setFilters({...filters, status: "No policy"})}/>
           </div>
 
+          {/* Ownership breakdown strip — compact secondary, sits directly below the
+              primary KPI cards. Ownership was already a dropdown filter but nothing on
+              the page told the admin it was a meaningful cut of the data, so it got
+              ignored. This strip gives the axis a visible entry point without adding
+              another full-size stat card. Each count is clickable and applies the
+              corresponding Ownership filter, the same way a tab applies its filter.
+              Management state stays dropdown-only — its most important state
+              (No policy set) is already a primary stat card, and the rest are better
+              understood through their dedicated tabs (Reconciliation, Break-glass). */}
+          <div style={{ padding: "8px 24px", borderBottom: "1px solid var(--border-subtle)", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", background: "var(--bg-surface)" }}>
+            <span style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7 }}>Ownership</span>
+            {[
+              { key: "Individual", label: "Individual" },
+              { key: "Shared",     label: "Shared" },
+              { key: "Non-human",  label: "Non-human" },
+            ].map((o, i, arr) => {
+              const value = all.filter(c => ownershipOf(c) === o.key).length;
+              const active = filters.ownership === o.key;
+              return (
+                <React.Fragment key={o.key}>
+                  <button
+                    onClick={() => setFilters({ ...filters, ownership: active ? "Any" : o.key })}
+                    style={{
+                      background: active ? "var(--brand-soft)" : "transparent",
+                      color: active ? "var(--brand-fg)" : "var(--fg-2)",
+                      border: active ? "1px solid var(--brand)" : "1px solid transparent",
+                      borderRadius: 4,
+                      padding: "4px 10px",
+                      cursor: "pointer",
+                      font: `${active ? 600 : 500} 12.5px/1.2 var(--font-sans)`,
+                      display: "inline-flex", alignItems: "baseline", gap: 6,
+                    }}
+                    title={active ? `Clear ${o.label} filter` : `Filter to ${o.label} ownership`}
+                  >
+                    {o.label}: <strong style={{ color: active ? "var(--brand-fg)" : "var(--fg-1)", fontWeight: 700 }}>{value}</strong>
+                  </button>
+                  {i < arr.length - 1 && <span style={{ color: "var(--fg-4)", font: "400 12px/1 var(--font-sans)" }}>·</span>}
+                </React.Fragment>
+              );
+            })}
+            {filters.ownership !== "Any" && (
+              <button
+                onClick={() => setFilters({ ...filters, ownership: "Any" })}
+                className="btn btn-ghost btn-sm"
+                style={{ marginLeft: "auto", padding: "2px 10px", color: "var(--fg-3)" }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+
           {/* Toolbar */}
           <div style={{ padding: "10px 24px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <div style={{ position: "relative", width: 240 }}>
               <Icon name="search" size={13} color="var(--fg-4)" style={{ position: "absolute", left: 10, top: 11 }}/>
               <input className="input" value={q} onChange={e => setQ(e.target.value)} placeholder="Search credentials…" style={{ paddingLeft: 30, height: 32, fontSize: 12.5 }}/>
             </div>
-            <FilterDropdown label="Nature"           value={filters.nature}    onChange={v => setFilters({...filters, nature: v})}    options={[["Any","Any"],["Password","Password"],["SSH Key","SSH Key"],["App Secret","App Secret"],["Cloud-IAM","Cloud-IAM"],["Certificate reference","Certificate"]]}/>
+            {/* "Type" filter label matches the TYPE column header exactly — same word,
+                same case convention as the table. Options reorder: SSH Key / App Secret
+                / Cloud-IAM come first because each has a corresponding tab (SSH Keys /
+                Application Secrets / Cloud/IAM Accounts) — matching that left-to-right
+                tab sequence means an admin scanning the tab bar and the dropdown reads
+                the same mental model twice. Password and Certificate reference have no
+                dedicated tab, so they sit at the end.
+
+                Rule for future additions: a new type only earns its own tab if it needs
+                a distinct stat header and proactive banner (SSH Keys shows Stale /
+                Orphaned counts, Cloud/IAM shows Root accounts vaulted). If a new type
+                would just be All-Credentials filtered by Type=X with no additional
+                computed context, keep it dropdown-only — no tab. */}
+            <FilterDropdown label="Type"             value={filters.nature}    onChange={v => setFilters({...filters, nature: v})}    options={[["Any","Any"],["SSH Key","SSH Key"],["App Secret","App Secret"],["Cloud-IAM","Cloud-IAM"],["Password","Password"],["Certificate reference","Certificate"]]}/>
             <FilterDropdown label="Ownership"        value={filters.ownership} onChange={v => setFilters({...filters, ownership: v})} options={[["Any","Any"],["Individual","Individual"],["Shared","Shared"],["Non-human","Non-human"]]}/>
             <FilterDropdown label="Management state" value={filters.mgmt}      onChange={v => setFilters({...filters, mgmt: v})}      options={[["Any","Any"],["Vaulted-Managed","Vaulted-Managed"],["Ad-hoc-Unmanaged","Ad-hoc-Unmanaged"],["Federated-SSO","Federated-SSO"],["Reconciliation","Reconciliation"],["Break-glass","Break-glass"]]}/>
             <FilterDropdown label="Status"           value={filters.status}    onChange={v => setFilters({...filters, status: v})}    options={[["Any","Any"],["Healthy","Healthy"],["Overdue","Overdue"],["Failed","Failed"],["Drifted","Drifted"],["No policy","No policy"]]}/>
