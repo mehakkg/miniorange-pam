@@ -236,6 +236,192 @@ const HelperCallout = ({ children }) => (
   }}>{children}</div>
 );
 
+// ─── Credential Source Picker ─────────────────────────────────────────────
+// One component, three outcomes: mint a new credential, attach an existing
+// vaulted one, or claim a Discovered one (found on the network but not yet
+// vaulted). Renders everywhere a resource-creation flow needs a root
+// credential — the wizard's Step 1, and per-row in bulk import panels. The
+// three outcomes surface downstream on result tables as the state chips
+// New / Vaulted (linked) / Discovered (claimed) so admins see the same
+// vocabulary regardless of which entry method they used.
+//
+// Value shape:
+//   null                                              — no selection yet
+//   { mode: "new",    username, credType, secret }    — Create new
+//   { mode: "attach", credentialId, credentialDisplay } — Use existing → Attach
+//   { mode: "claim",  discoveredId, discoveredDisplay } — Use existing → Claim & vault
+
+const DISCOVERED_CREDS = [
+  { id: "d-1", display: "admin@10.0.5.4",             type: "Password", foundOn: "auth-server-01",           foundVia: "Network scan",    foundAt: "12h ago" },
+  { id: "d-2", display: "pi@raspberry-pi.internal",   type: "Password", foundOn: "raspberry-pi.internal",    foundVia: "Discovery scan",  foundAt: "2 days ago" },
+  { id: "d-3", display: "svc-legacy@10.0.5.11",       type: "SSH Key",  foundOn: "old-web-01",                foundVia: "Network scan",    foundAt: "3 days ago" },
+];
+
+const CredentialSourcePicker = ({ value, onChange, resourceContext, compact }) => {
+  const currentMode = value?.mode || "new";
+  const [tab, setTab] = React.useState(currentMode === "new" ? "new" : "existing");
+  const [search, setSearch] = React.useState("");
+
+  const vaulted = (globalThis.CREDS || []).map(c => ({
+    id: c.id, display: c.display, type: c.type, owner: c.owner, resourceCount: (c.resources || []).length,
+  }));
+  const q = search.trim().toLowerCase();
+  const vaultedMatched = q ? vaulted.filter(c => (c.display + " " + (c.owner || "") + " " + c.type).toLowerCase().includes(q)) : vaulted;
+  const discoveredMatched = q ? DISCOVERED_CREDS.filter(d => (d.display + " " + d.foundOn).toLowerCase().includes(q)) : DISCOVERED_CREDS;
+
+  const setNew = (patch) => onChange({
+    mode: "new",
+    username: value?.username || "",
+    credType: value?.credType || "password",
+    secret: value?.secret || "",
+    ...patch,
+  });
+
+  const attach = (c) => onChange({ mode: "attach", credentialId: c.id, credentialDisplay: c.display, credentialType: c.type });
+  const claim  = (d) => onChange({ mode: "claim",  discoveredId: d.id, discoveredDisplay: d.display, credentialType: d.type });
+
+  const CredRow = ({ left, primary, secondary, action, state, onAction, actionLabel }) => (
+    <button type="button" onClick={onAction} style={{
+      width: "100%", display: "flex", alignItems: "center", gap: 10,
+      padding: "10px 12px", border: `1px solid ${state === "active" ? "var(--brand)" : "var(--border)"}`,
+      background: state === "active" ? "var(--brand-soft)" : "var(--bg-app)",
+      borderRadius: 6, cursor: "pointer", textAlign: "left",
+    }}>
+      {left}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ font: `${state === "active" ? 600 : 500} 13px/1.3 var(--font-sans)`, color: "var(--fg-1)" }}>{primary}</div>
+        <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>{secondary}</div>
+      </div>
+      <span style={{ font: "600 11.5px/1 var(--font-sans)", color: state === "active" ? "var(--brand-fg)" : "var(--brand-fg)", padding: "4px 10px", border: `1px solid ${state === "active" ? "var(--brand)" : "var(--brand)"}`, borderRadius: 999 }}>
+        {state === "active" ? "Selected" : actionLabel}
+      </span>
+    </button>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div>
+        <Segmented value={tab} onChange={setTab} options={[
+          { value: "new",      label: "Create new" },
+          { value: "existing", label: "Use existing" },
+        ]}/>
+        <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 6 }}>
+          {tab === "new"
+            ? "Provide the root credential PAM will use to onboard this resource. It's vaulted immediately."
+            : "Reuse a credential that's already vaulted, or claim one PAM has discovered on the network."}
+        </div>
+      </div>
+
+      {tab === "new" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <Field label="Root / admin username" required>
+            <input className="input t-mono" value={value?.username || ""} onChange={e => setNew({ username: e.target.value })} placeholder="root · postgres · Administrator"/>
+          </Field>
+          <Field label="Credential type">
+            <Segmented value={value?.credType || "password"} onChange={v => setNew({ credType: v })} options={[
+              { value: "password", label: "Password" },
+              { value: "sshkey",   label: "SSH Key" },
+            ]}/>
+          </Field>
+          {(value?.credType || "password") === "password" ? (
+            <Field label="Password" required>
+              <input className="input t-mono" type="password" value={value?.secret || ""} onChange={e => setNew({ secret: e.target.value })} placeholder="Enter password"/>
+            </Field>
+          ) : (
+            <Field label="SSH private key" required hint="Paste PEM-formatted key contents. PAM stores this in the vault immediately.">
+              <textarea className="input t-mono" rows={compact ? 2 : 4} value={value?.secret || ""} onChange={e => setNew({ secret: e.target.value })} placeholder={"-----BEGIN RSA PRIVATE KEY-----\n..."}/>
+            </Field>
+          )}
+        </div>
+      )}
+
+      {tab === "existing" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ position: "relative" }}>
+            <Icon name="search" size={13} color="var(--fg-4)" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }}/>
+            <input className="input" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by display name, owner, or discovered host…" style={{ paddingLeft: 30 }}/>
+          </div>
+
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <span style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>Vaulted</span>
+              <span className="badge">{vaultedMatched.length}</span>
+              <span style={{ font: "400 11px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>Already managed by PAM · reuse without re-entering the secret</span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: compact ? 180 : 240, overflowY: "auto", paddingRight: 4 }}>
+              {vaultedMatched.length === 0 && (
+                <div style={{ padding: 14, textAlign: "center", font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-4)" }}>No vaulted credentials match "{search}".</div>
+              )}
+              {vaultedMatched.map(c => (
+                <CredRow key={c.id}
+                  left={<Icon name={c.type === "SSH Key" ? "key" : "lock"} size={13} color="var(--brand-fg)"/>}
+                  primary={<><span>{c.display}</span><span style={{ marginLeft: 8, font: "400 11px/1 var(--font-sans)", color: "var(--fg-4)" }}>· {c.type}</span></>}
+                  secondary={<>{c.owner || "Unassigned"} · {c.resourceCount} resource{c.resourceCount === 1 ? "" : "s"}</>}
+                  actionLabel="Attach"
+                  state={value?.mode === "attach" && value?.credentialId === c.id ? "active" : null}
+                  onAction={() => attach(c)}/>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <span style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>Discovered</span>
+              <span className="badge">{discoveredMatched.length}</span>
+              <span style={{ font: "400 11px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>Found on the network but not yet vaulted · claim to manage</span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: compact ? 140 : 200, overflowY: "auto", paddingRight: 4 }}>
+              {discoveredMatched.length === 0 && (
+                <div style={{ padding: 14, textAlign: "center", font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-4)" }}>No discovered credentials match "{search}".</div>
+              )}
+              {discoveredMatched.map(d => (
+                <CredRow key={d.id}
+                  left={<Icon name="eye" size={13} color="var(--warning-fg)"/>}
+                  primary={<><span className="t-mono" style={{ fontSize: 12.5 }}>{d.display}</span><span style={{ marginLeft: 8, font: "400 11px/1 var(--font-sans)", color: "var(--fg-4)" }}>· {d.type}</span></>}
+                  secondary={<>Found via {d.foundVia} · {d.foundAt} · on {d.foundOn}</>}
+                  actionLabel="Claim & vault"
+                  state={value?.mode === "claim" && value?.discoveredId === d.id ? "active" : null}
+                  onAction={() => claim(d)}/>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Small chip used in result tables to signal what happened per-row: was the
+// credential newly minted, attached to a vaulted one, or claimed from
+// discovered? Same vocabulary across every entry method.
+const CredentialOutcomeChip = ({ source }) => {
+  if (!source) return null;
+  const map = {
+    new:    { label: "New credential",       cls: "badge badge-brand" },
+    attach: { label: "Attached to Vaulted",  cls: "badge badge-success" },
+    claim:  { label: "Claimed & vaulted",    cls: "badge badge-warning" },
+  };
+  const m = map[source.mode];
+  if (!m) return null;
+  return <span className={m.cls} style={{ gap: 4 }}>{m.label}</span>;
+};
+
+const credentialSourceValid = (v) => {
+  if (!v) return false;
+  if (v.mode === "new") return !!(v.username && v.secret);
+  if (v.mode === "attach") return !!v.credentialId;
+  if (v.mode === "claim")  return !!v.discoveredId;
+  return false;
+};
+
+const credentialSourceSummary = (v) => {
+  if (!v) return "None selected";
+  if (v.mode === "new")    return `New · ${v.username || "(no username)"} (${v.credType === "sshkey" ? "SSH key" : "password"}, vaulted on create)`;
+  if (v.mode === "attach") return `Attached · ${v.credentialDisplay}`;
+  if (v.mode === "claim")  return `Claimed · ${v.discoveredDisplay}`;
+  return "None selected";
+};
+
 // ─── Type-aware defaults for Step 1 ─────────────────────────────────────────
 const TYPE_PORT_DEFAULT = { server: 22, database: 5432, web: 443, cloud: 443 };
 const TYPE_HOST_PLACEHOLDER = {
@@ -325,25 +511,12 @@ const NewStep1RootCred = ({ data, setData }) => {
         <HelperCallout>
           <strong>This is the only credential you need to provide manually.</strong> PAM will configure rotation, admin account mapping, and access level from this in the next step.
         </HelperCallout>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 14 }}>
-          <Field label="Root / admin username" required>
-            <input className="input t-mono" value={data.rootUsername} onChange={e => patch("rootUsername", e.target.value)} placeholder="root · postgres · Administrator"/>
-          </Field>
-          <Field label="Credential type">
-            <Segmented value={data.rootCredType} onChange={v => patch("rootCredType", v)} options={[
-              { value: "password", label: "Password" },
-              { value: "sshkey",   label: "SSH Key" },
-            ]}/>
-          </Field>
-          {data.rootCredType === "password" ? (
-            <Field label="Password" required>
-              <input className="input t-mono" type="password" value={data.rootSecret} onChange={e => patch("rootSecret", e.target.value)} placeholder="Enter password"/>
-            </Field>
-          ) : (
-            <Field label="SSH private key" required hint="Paste PEM-formatted key contents. PAM stores this in the vault immediately.">
-              <textarea className="input t-mono" rows={4} value={data.rootSecret} onChange={e => patch("rootSecret", e.target.value)} placeholder={"-----BEGIN RSA PRIVATE KEY-----\n..."}/>
-            </Field>
-          )}
+        <div style={{ marginTop: 14 }}>
+          <CredentialSourcePicker
+            value={data.credentialSource}
+            onChange={(v) => patch("credentialSource", v)}
+            resourceContext={{ name: data.name, type: data.type }}
+          />
         </div>
       </div>
     </div>
@@ -475,7 +648,12 @@ const NewStep3Confirm = ({ data }) => {
         <div style={{ display: "grid", gridTemplateColumns: "170px 1fr", rowGap: 14, columnGap: 20 }}>
           <ConfirmRow label="Resource" value={<span><strong style={{ color: "var(--fg-1)" }}>{data.name || "(untitled)"}</strong> · {cap(data.type)} · {cap(data.env)} · {cap(data.criticality)}</span>}/>
           <ConfirmRow label="Host / port" value={<span className="t-mono" style={{ fontSize: 12.5 }}>{data.host}:{data.port}</span>}/>
-          <ConfirmRow label="Root credential" value={<span>added as <strong>{data.rootUsername}</strong> — non-viewable, stored in the vault</span>}/>
+          <ConfirmRow label="Root credential" value={
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <CredentialOutcomeChip source={data.credentialSource}/>
+              <span>{credentialSourceSummary(data.credentialSource)}</span>
+            </span>
+          }/>
           <ConfirmRow label="Rotation" value={`${rotation.name} (${rotation.detail})`}/>
           <ConfirmRow label="Local accounts" value={data.localAccountMode === "ephemeral" ? "Ephemeral — created on access, destroyed after session" : "Standing — persist across sessions"}/>
           <ConfirmRow label="Reconciliation account" value={recon.name}/>
@@ -510,16 +688,45 @@ const BULK_MOCK_DISCOVERED = [
 
 const BulkImportPanel = ({ source, onClose, onDone }) => {
   const [phase, setPhase] = React.useState("edit");
+  // Every row keeps a `credentialSource` — same shape the picker emits. Rows
+  // without a credentialSource are skipped at onboard time. This unifies the
+  // three outcomes (new / attach / claim) into one field the caller can
+  // inspect once instead of three parallel inputs.
   const [rows, setRows] = React.useState(BULK_MOCK_DISCOVERED.map(r => ({
-    ...r, selected: true, rootUsername: "", rootSecret: "", rootCredType: "password",
+    ...r, selected: true, credentialSource: null,
   })));
-  const [shared, setShared] = React.useState({ apply: false, username: "", secret: "", credType: "password" });
+  const [pickerFor, setPickerFor] = React.useState(null); // null | { rowId } | { bulk: true }
+  const [pickerDraft, setPickerDraft] = React.useState(null);
   const [results, setResults] = React.useState([]);
 
   const setRow = (id, patch) => setRows(rs => rs.map(r => r.id === id ? { ...r, ...patch } : r));
-  const applyShared = () => setRows(rs => rs.map(r => r.selected
-    ? { ...r, rootUsername: shared.username, rootSecret: shared.secret, rootCredType: shared.credType }
-    : r));
+
+  const openRowPicker = (rowId) => {
+    const row = rows.find(r => r.id === rowId);
+    setPickerDraft(row?.credentialSource || null);
+    setPickerFor({ rowId });
+  };
+  const openBulkPicker = () => {
+    // Bulk-apply starts blank — the admin picks an existing credential to
+    // attach to every selected row in one motion. This is the "five servers,
+    // one credential, one interaction" win called out in the spec.
+    setPickerDraft(null);
+    setPickerFor({ bulk: true });
+  };
+  const applyPicker = () => {
+    if (!pickerDraft || !credentialSourceValid(pickerDraft)) return;
+    if (pickerFor?.bulk) {
+      // Apply to every currently-selected row. Skip rows that already have
+      // a per-row override — the admin sees which rows changed on the next
+      // review pass rather than silently overwriting.
+      setRows(rs => rs.map(r => r.selected ? { ...r, credentialSource: pickerDraft } : r));
+    } else if (pickerFor?.rowId) {
+      setRow(pickerFor.rowId, { credentialSource: pickerDraft });
+    }
+    setPickerFor(null);
+    setPickerDraft(null);
+  };
+  const closePicker = () => { setPickerFor(null); setPickerDraft(null); };
 
   const runOnboarding = (retryOnly) => {
     const target = retryOnly
@@ -528,9 +735,9 @@ const BulkImportPanel = ({ source, onClose, onDone }) => {
     setPhase("running");
     setTimeout(() => {
       const out = target.map(r => {
-        if (!r.rootUsername || !r.rootSecret)   return { id: r.id, name: r.name, status: "skipped", reason: "no root credential provided" };
-        if (r.name === "ledger-mongo-cluster")   return { id: r.id, name: r.name, status: "failed",  reason: "root credential could not authenticate", retryable: true };
-        return { id: r.id, name: r.name, status: "success" };
+        if (!credentialSourceValid(r.credentialSource)) return { id: r.id, name: r.name, status: "skipped", reason: "no root credential provided", credentialSource: null };
+        if (r.name === "ledger-mongo-cluster")           return { id: r.id, name: r.name, status: "failed",  reason: "root credential could not authenticate", retryable: true, credentialSource: r.credentialSource };
+        return { id: r.id, name: r.name, status: "success", credentialSource: r.credentialSource };
       });
       setResults(prev => retryOnly ? prev.map(p => out.find(o => o.id === p.id) || p) : out);
       setPhase("result");
@@ -538,6 +745,7 @@ const BulkImportPanel = ({ source, onClose, onDone }) => {
   };
 
   const selectedCount = rows.filter(r => r.selected).length;
+  const selectedWithCred = rows.filter(r => r.selected && credentialSourceValid(r.credentialSource)).length;
   const failedCount = results.filter(r => r.status === "failed").length;
   const sourceLabel = source === "csv" ? "CSV" : source === "ad" ? "Active Directory" : "scan";
 
@@ -567,33 +775,22 @@ const BulkImportPanel = ({ source, onClose, onDone }) => {
           <div style={{ maxWidth: 940, margin: "0 auto" }}>
             <div style={{ marginBottom: 14, font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>
               {sourceLabel === "CSV"
-                ? "Preview of resources parsed from your CSV. Review each row, edit its criticality if needed, and provide a root credential."
-                : "Discovered from " + sourceLabel + ". Review each row, edit its criticality if needed, and provide a root credential."}
+                ? "Preview of resources parsed from your CSV. Review each row, edit its criticality if needed, and set the root credential."
+                : "Discovered from " + sourceLabel + ". Review each row, edit its criticality if needed, and set the root credential."}
               {" "}Each row is onboarded through the same PAM-inferred configuration path as a single-resource add — you only supply the root credential here.
             </div>
 
-            <div className="card" style={{ padding: 14, marginBottom: 14 }}>
-              <Toggle
-                value={shared.apply}
-                onChange={v => setShared(s => ({ ...s, apply: v }))}
-                label="Apply the same root credential to all selected rows"
-                hint="Useful when every discovered target uses a shared bastion account. You can still override any row individually below."
-              />
-              {shared.apply && (
-                <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1fr 1fr 190px auto", gap: 10, alignItems: "flex-end" }}>
-                  <Field label="Root username"><input className="input t-mono" value={shared.username} onChange={e => setShared(s => ({ ...s, username: e.target.value }))} placeholder="root"/></Field>
-                  <Field label={shared.credType === "sshkey" ? "SSH key (paste)" : "Password"}>
-                    <input className="input t-mono" type={shared.credType === "sshkey" ? "text" : "password"} value={shared.secret} onChange={e => setShared(s => ({ ...s, secret: e.target.value }))} placeholder={shared.credType === "sshkey" ? "-----BEGIN…" : "Enter password"}/>
-                  </Field>
-                  <Field label="Type">
-                    <Segmented value={shared.credType} onChange={v => setShared(s => ({ ...s, credType: v }))} options={[
-                      { value: "password", label: "Password" },
-                      { value: "sshkey",   label: "SSH Key" },
-                    ]}/>
-                  </Field>
-                  <button className="btn" onClick={applyShared} disabled={!shared.username || !shared.secret}>Apply to {selectedCount}</button>
-                </div>
-              )}
+            {/* Bulk-apply toolbar — the highest setup-time reduction in the whole
+                bulk flow. Pick one existing credential once, apply to every
+                selected row. Nothing else on the row is changed. */}
+            <div style={{ padding: "10px 14px", marginBottom: 14, background: "var(--bg-surface-2)", borderRadius: 6, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ font: "500 12.5px/1.4 var(--font-sans)", color: "var(--fg-2)" }}>
+                <strong style={{ color: "var(--fg-1)" }}>{selectedCount}</strong> of {rows.length} selected · <strong style={{ color: selectedWithCred === selectedCount ? "var(--success-fg)" : "var(--warning-fg)" }}>{selectedWithCred}</strong> have a credential
+              </span>
+              <div style={{ flex: 1 }}/>
+              <button className="btn btn-sm" disabled={selectedCount === 0} onClick={openBulkPicker} style={{ opacity: selectedCount ? 1 : 0.5 }}>
+                <Icon name="key" size={11}/> Apply existing credential to selected rows
+              </button>
             </div>
 
             <div className="card">
@@ -606,8 +803,7 @@ const BulkImportPanel = ({ source, onClose, onDone }) => {
                     <th>Host</th>
                     <th>Environment</th>
                     <th style={{ width: 120 }}>Criticality</th>
-                    <th>Root username</th>
-                    <th>Secret</th>
+                    <th>Credential</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -626,12 +822,59 @@ const BulkImportPanel = ({ source, onClose, onDone }) => {
                           <option value="low">Low</option>
                         </select>
                       </td>
-                      <td><input className="input t-mono" style={{ height: 30, fontSize: 12 }} value={r.rootUsername} onChange={e => setRow(r.id, { rootUsername: e.target.value })} placeholder="root"/></td>
-                      <td><input className="input t-mono" style={{ height: 30, fontSize: 12 }} type="password" value={r.rootSecret} onChange={e => setRow(r.id, { rootSecret: e.target.value })} placeholder="…"/></td>
+                      <td>
+                        {credentialSourceValid(r.credentialSource) ? (
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => openRowPicker(r.id)}
+                            style={{ font: "500 12px/1.3 var(--font-sans)", padding: "4px 8px", textAlign: "left", display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap", maxWidth: 320 }}
+                          >
+                            <CredentialOutcomeChip source={r.credentialSource}/>
+                            <span style={{ color: "var(--fg-2)" }}>{credentialSourceSummary(r.credentialSource)}</span>
+                            <Icon name="edit" size={10} color="var(--fg-4)"/>
+                          </button>
+                        ) : (
+                          <button className="btn btn-sm" onClick={() => openRowPicker(r.id)} style={{ font: "500 12px/1 var(--font-sans)" }}>
+                            <Icon name="plus" size={11}/> Set credential
+                          </button>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Picker modal — one component, two entry points (per-row + bulk). The
+          modal chrome is here rather than inside the picker so the picker
+          stays reusable in non-modal contexts (like Step 1 of the manual
+          wizard, where it's inline). */}
+      {pickerFor && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={closePicker}>
+          <div style={{ width: 640, maxHeight: "88vh", background: "var(--bg-app)", borderRadius: 10, boxShadow: "0 24px 64px rgba(0,0,0,0.25)", display: "flex", flexDirection: "column" }} onClick={e => e.stopPropagation()}>
+            <div style={{ padding: 20, borderBottom: "1px solid var(--border)" }}>
+              <h2 style={{ font: "600 15px/1.3 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>
+                {pickerFor.bulk
+                  ? `Set credential for ${selectedCount} selected row${selectedCount === 1 ? "" : "s"}`
+                  : `Set credential — ${rows.find(r => r.id === pickerFor.rowId)?.name}`}
+              </h2>
+              <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>
+                {pickerFor.bulk
+                  ? "Attaching a Vaulted credential is the fastest path — same credential, every selected row. Every row still gets its own per-row review on the result screen."
+                  : "Choose one path: mint a new credential, attach an existing Vaulted one, or claim a Discovered one PAM has found on the network."}
+              </div>
+            </div>
+            <div style={{ padding: 20, overflowY: "auto", flex: 1 }}>
+              <CredentialSourcePicker value={pickerDraft} onChange={setPickerDraft} compact/>
+            </div>
+            <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end", gap: 8, background: "var(--bg-surface)" }}>
+              <button className="btn" onClick={closePicker}>Cancel</button>
+              <button className="btn btn-primary" onClick={applyPicker} disabled={!credentialSourceValid(pickerDraft)}>
+                {pickerFor.bulk ? `Apply to ${selectedCount} row${selectedCount === 1 ? "" : "s"}` : "Set credential"}
+              </button>
             </div>
           </div>
         </div>
@@ -655,7 +898,7 @@ const BulkImportPanel = ({ source, onClose, onDone }) => {
             </div>
             <div className="card">
               <table className="table">
-                <thead><tr><th style={{ width: 32 }}></th><th>Resource</th><th>Outcome</th><th style={{ textAlign: "right" }}></th></tr></thead>
+                <thead><tr><th style={{ width: 32 }}></th><th>Resource</th><th style={{ width: 170 }}>Credential outcome</th><th>Status</th><th style={{ textAlign: "right" }}></th></tr></thead>
                 <tbody>
                   {results.map(r => (
                     <tr key={r.id}>
@@ -665,6 +908,17 @@ const BulkImportPanel = ({ source, onClose, onDone }) => {
                         {r.status === "skipped" && <Icon name="circle" size={15} color="var(--fg-4)"/>}
                       </td>
                       <td><span style={{ font: "500 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{r.name}</span></td>
+                      <td>
+                        {/* Per-row credential-outcome chip — same New / Vaulted /
+                            Discovered vocabulary the interactive picker uses.
+                            Applies across every entry method (Manual, Network scan,
+                            AD, CSV, API) so an admin reviewing results reads one
+                            consistent state language regardless of how the row was
+                            created. */}
+                        {r.credentialSource
+                          ? <CredentialOutcomeChip source={r.credentialSource}/>
+                          : <span style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>—</span>}
+                      </td>
                       <td style={{ font: "400 12.5px/1.4 var(--font-sans)", color: r.status === "failed" ? "var(--danger-fg)" : r.status === "success" ? "var(--success-fg)" : "var(--fg-4)" }}>
                         {r.status === "success" && "Onboarded successfully"}
                         {r.status === "failed"  && `Failed: ${r.reason}`}
@@ -691,7 +945,9 @@ const NewManualAdd = ({ onClose, onCreated }) => {
   const [data, setData] = React.useState({
     name: "", type: "server", host: "", port: 22,
     env: "production", criticality: "medium",
-    rootUsername: "", rootSecret: "", rootCredType: "password",
+    // Credential Source Picker output — null until the admin selects. See
+    // CredentialSourcePicker for the shape (mode: new | attach | claim).
+    credentialSource: null,
     rotationPolicyId: "prod-daily",
     localAccountMode: "ephemeral",
     reconciliationAccountId: "backup-reconciliation-01",
@@ -714,11 +970,11 @@ const NewManualAdd = ({ onClose, onCreated }) => {
     { n: 2, label: "Review PAM configuration" },
     { n: 3, label: "Confirm" },
   ];
-  const step1Valid = data.name && data.host && data.rootUsername && data.rootSecret;
+  const step1Valid = data.name && data.host && credentialSourceValid(data.credentialSource);
   const canProceed = step === 1 ? step1Valid : true;
 
   const confirmClose = () => {
-    const hasInput = data.name || data.host || data.rootUsername || data.rootSecret;
+    const hasInput = data.name || data.host || !!data.credentialSource;
     if (hasInput && !confirm("Discard this resource? Nothing has been saved yet.")) return;
     onClose();
   };
