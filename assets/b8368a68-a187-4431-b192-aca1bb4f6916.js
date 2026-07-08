@@ -876,7 +876,7 @@ const BG_CRED_MOCK = [
   { id: "bg-4", display: "recovery-jumpbox",     resource: "dev-jumpbox",            sensitivity: "Medium",   lastUsed: "Apr 03, 2026",  incidentId: "BG-0122", rotation: "pending", rotationDetail: "Post-incident rotation pending" },
 ];
 
-const BreakGlassCredsTab = () => {
+const BreakGlassCredsTab = ({ onMarkExisting }) => {
   const rows = BG_CRED_MOCK;
   const usedInLast30 = rows.filter(r => r.lastUsed && ["May 18, 2026","Apr 03, 2026"].includes(r.lastUsed)).length;
   const rotationPending = rows.filter(r => r.rotation === "pending").length;
@@ -893,9 +893,14 @@ const BreakGlassCredsTab = () => {
         <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "8px 12px", background: "var(--bg-surface-2)", borderRadius: 6, flex: 1 }}>
           <Icon name="info" size={13} color="var(--fg-3)" style={{ marginTop: 2 }}/>
           <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>
-            These are the credentials classified as break-glass-eligible and their rotation status. The <strong>incident lifecycle</strong> (trigger, monitor, review) lives at <a href="#" style={{ color: "var(--brand-fg)" }}>/break-glass →</a>
+            These are the credentials classified as break-glass-eligible and their rotation status. Break-glass is a <strong>classification applied to something that already exists</strong> — a credential must be vaulted first, then flagged for emergency use. The <strong>incident lifecycle</strong> (trigger, monitor, review) lives at <a href="#" style={{ color: "var(--brand-fg)" }}>/break-glass →</a>
           </div>
         </div>
+        {onMarkExisting && (
+          <button className="btn btn-primary btn-sm" onClick={onMarkExisting} style={{ flexShrink: 0 }}>
+            <Icon name="shield" size={11}/> Mark existing credential
+          </button>
+        )}
       </div>
 
       <div style={{ flex: 1, overflow: "auto", marginTop: 12 }}>
@@ -942,4 +947,71 @@ const BreakGlassCredsTab = () => {
   );
 };
 
-Object.assign(window, { SSHKeysTab, AppSecretsTab, ReconciliationTab, RotationHealthTab, CSVImportPanel, Donut, CloudIAMTab, BreakGlassCredsTab });
+// ─── Break-Glass mark-existing modal ─────────────────────────────────────
+// Break-glass is a classification, not a credential-creation flow: a
+// credential must already be vaulted before it can be flagged as
+// break-glass-eligible. So this modal wraps CredentialSourcePicker in
+// existingOnly mode (no "Create new" tab) and adds a "Mark as break-glass
+// eligible" confirm step. Reuses the picker component — does not build a
+// separate search/select UI.
+const BreakGlassMarkModal = ({ onClose, onMarked }) => {
+  const [picked, setPicked] = React.useState(null);
+  const [confirmed, setConfirmed] = React.useState(false);
+  const ready = picked && (picked.mode === "attach" || picked.mode === "claim");
+
+  const displayName = picked?.credentialDisplay || picked?.discoveredDisplay;
+
+  return (
+    <>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", zIndex: 200 }}/>
+      <div style={{ position: "fixed", top: "50%", left: "50%", transform: "translate(-50%, -50%)", width: 640, maxHeight: "88vh", background: "var(--bg-app)", borderRadius: 10, boxShadow: "0 24px 64px rgba(0,0,0,0.25)", zIndex: 201, display: "flex", flexDirection: "column" }}>
+        <div style={{ padding: 20, borderBottom: "1px solid var(--border)" }}>
+          <h2 style={{ font: "600 15px/1.3 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>
+            {confirmed ? "Mark as break-glass eligible" : "Select credential to mark"}
+          </h2>
+          <div style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>
+            {confirmed
+              ? `${displayName} will appear in this tab and become available for emergency-use flows.`
+              : "Only vaulted credentials can be flagged for emergency use. Create-new is intentionally not an option here — the credential must exist first."}
+          </div>
+        </div>
+
+        <div style={{ padding: 20, overflowY: "auto", flex: 1 }}>
+          {!confirmed ? (
+            <CredentialSourcePicker value={picked} onChange={setPicked} existingOnly compact/>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <div style={{ padding: 14, background: "#F3E8FF", color: "#7B3EA8", borderRadius: 6, display: "flex", gap: 10, alignItems: "flex-start", font: "400 12.5px/1.5 var(--font-sans)" }}>
+                <Icon name="shield" size={14} color="#7B3EA8" style={{ marginTop: 2 }}/>
+                <div>
+                  <strong>{displayName}</strong> will be classified as break-glass-eligible.
+                  Emergency-use policy: session recording is always on, full command log, MFA re-challenge on every use, and post-use rotation is auto-scheduled.
+                </div>
+              </div>
+              <div style={{ padding: 12, background: "var(--bg-surface-2)", borderRadius: 6, font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>
+                This action is audited and reversible. It does not trigger a break-glass incident — it just makes this credential eligible for future emergency-use flows. Incident lifecycle continues to live at <a href="#" style={{ color: "var(--brand-fg)" }}>/break-glass →</a>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end", gap: 8, background: "var(--bg-surface)" }}>
+          <button className="btn" onClick={onClose}>Cancel</button>
+          {!confirmed && (
+            <button className="btn btn-primary" disabled={!ready} onClick={() => setConfirmed(true)}>
+              Continue →
+            </button>
+          )}
+          {confirmed && <>
+            <button className="btn" onClick={() => setConfirmed(false)}>← Back</button>
+            <button className="btn btn-primary" style={{ background: "#7B3EA8", borderColor: "#7B3EA8" }} onClick={() => { onMarked?.(picked); onClose(); }}>
+              <Icon name="shield" size={12} color="#fff"/> Mark as break-glass eligible
+            </button>
+          </>}
+        </div>
+      </div>
+    </>
+  );
+};
+
+Object.assign(window, { SSHKeysTab, AppSecretsTab, ReconciliationTab, RotationHealthTab, CSVImportPanel, Donut, CloudIAMTab, BreakGlassCredsTab, BreakGlassMarkModal });

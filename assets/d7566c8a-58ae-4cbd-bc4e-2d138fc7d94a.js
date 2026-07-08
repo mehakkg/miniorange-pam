@@ -257,9 +257,13 @@ const DISCOVERED_CREDS = [
   { id: "d-3", display: "svc-legacy@10.0.5.11",       type: "SSH Key",  foundOn: "old-web-01",                foundVia: "Network scan",    foundAt: "3 days ago" },
 ];
 
-const CredentialSourcePicker = ({ value, onChange, resourceContext, compact }) => {
+const CredentialSourcePicker = ({ value, onChange, resourceContext, compact, existingOnly }) => {
+  // existingOnly locks the picker to Use-existing. Used by the Break-glass
+  // tab's add flow: a credential must already be vaulted before it can be
+  // flagged for emergency use — an unvaulted credential can't be marked
+  // break-glass-eligible, so hiding the Create-new tab is the right guard.
   const currentMode = value?.mode || "new";
-  const [tab, setTab] = React.useState(currentMode === "new" ? "new" : "existing");
+  const [tab, setTab] = React.useState(existingOnly ? "existing" : (currentMode === "new" ? "new" : "existing"));
   const [search, setSearch] = React.useState("");
 
   const vaulted = (globalThis.CREDS || []).map(c => ({
@@ -300,19 +304,21 @@ const CredentialSourcePicker = ({ value, onChange, resourceContext, compact }) =
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div>
-        <Segmented value={tab} onChange={setTab} options={[
-          { value: "new",      label: "Create new" },
-          { value: "existing", label: "Use existing" },
-        ]}/>
-        <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 6 }}>
-          {tab === "new"
-            ? "Provide the root credential PAM will use to onboard this resource. It's vaulted immediately."
-            : "Reuse a credential that's already vaulted, or claim one PAM has discovered on the network."}
+      {!existingOnly && (
+        <div>
+          <Segmented value={tab} onChange={setTab} options={[
+            { value: "new",      label: "Create new" },
+            { value: "existing", label: "Use existing" },
+          ]}/>
+          <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 6 }}>
+            {tab === "new"
+              ? "Provide the root credential PAM will use to onboard this resource. It's vaulted immediately."
+              : "Reuse a credential that's already vaulted, or claim one PAM has discovered on the network."}
+          </div>
         </div>
-      </div>
+      )}
 
-      {tab === "new" && (
+      {tab === "new" && !existingOnly && (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <Field label="Root / admin username" required>
             <input className="input t-mono" value={value?.username || ""} onChange={e => setNew({ username: e.target.value })} placeholder="root · postgres · Administrator"/>

@@ -6,7 +6,11 @@ const CredentialsV2 = ({ empty }) => {
   const [filters, setFilters] = React.useState({ nature: "Any", source: "Any", ownership: "Any", mgmt: "Any", status: "Any", resource: "Any", owner: "Any" });
   const [selected, setSelected] = React.useState(new Set());
   const [openId, setOpenId] = React.useState(null);
+  // Add flow — value is either false (closed) or a launchedFrom string:
+  // "all" | "ssh" | "secret" | "cloudiam". Break-glass has its own picker-
+  // based add flow and does NOT route through here (see showBgMark below).
   const [showAdd, setShowAdd] = React.useState(false);
+  const [showBgMark, setShowBgMark] = React.useState(false);
   const [showCsv, setShowCsv] = React.useState(false);
   const [rotateId, setRotateId] = React.useState(null);
   const [driftId, setDriftId] = React.useState(null);
@@ -154,7 +158,7 @@ const CredentialsV2 = ({ empty }) => {
               </>
             )}
           </div>
-          <button className="btn btn-primary" onClick={() => setShowAdd(true)}><Icon name="plus" size={13}/> Add credential</button>
+          <button className="btn btn-primary" onClick={() => setShowAdd("all")}><Icon name="plus" size={13}/> Add credential</button>
         </>}
       />
 
@@ -174,11 +178,11 @@ const CredentialsV2 = ({ empty }) => {
         ]}
       />
 
-      {tab === "ssh"      && <SSHKeysTab onOpen={setOpenId} onAdd={() => setShowAdd(true)}/>}
-      {tab === "secret"   && <AppSecretsTab onOpen={setOpenId} onAdd={() => setShowAdd(true)}/>}
-      {tab === "cloudiam" && <CloudIAMTab onAdd={() => setShowAdd(true)}/>}
+      {tab === "ssh"      && <SSHKeysTab onOpen={setOpenId} onAdd={() => setShowAdd("ssh")}/>}
+      {tab === "secret"   && <AppSecretsTab onOpen={setOpenId} onAdd={() => setShowAdd("secret")}/>}
+      {tab === "cloudiam" && <CloudIAMTab onAdd={() => setShowAdd("cloudiam")}/>}
       {tab === "recon"    && <ReconciliationTab/>}
-      {tab === "bg"       && <BreakGlassCredsTab/>}
+      {tab === "bg"       && <BreakGlassCredsTab onMarkExisting={() => setShowBgMark(true)}/>}
       {tab === "health"   && <RotationHealthTab/>}
 
       {tab === "all" && (
@@ -339,7 +343,7 @@ const CredentialsV2 = ({ empty }) => {
               empty || all.length === 0 ? (
                 <EmptyState icon="lock" title="No credentials in the vault yet"
                   description="Add credentials manually, import via CSV, or onboard from discovered accounts."
-                  action={<><button className="btn btn-primary" onClick={() => setShowAdd(true)}><Icon name="plus" size={11}/> Add credential</button><button className="btn"><Icon name="discovery" size={11}/> Import from Discovery</button></>}/>
+                  action={<><button className="btn btn-primary" onClick={() => setShowAdd("all")}><Icon name="plus" size={11}/> Add credential</button><button className="btn"><Icon name="discovery" size={11}/> Import from Discovery</button></>}/>
               ) : (
                 <div style={{ padding: 48, textAlign: "center", color: "var(--fg-3)" }}>
                   <Icon name="search" size={24} color="var(--fg-4)"/>
@@ -400,7 +404,7 @@ const CredentialsV2 = ({ empty }) => {
                         { label: "Test credential", icon: "check-circle", onClick: () => runTest(c) },
                         { label: "View history", icon: "history", onClick: () => setAuditCred(c.id) },
                         { label: "Assign owner", icon: "user", onClick: () => setAssignOwner(c) },
-                        { label: "Duplicate", icon: "copy", onClick: () => { setDupData({ ...c, display: "Copy of " + c.display }); setShowAdd(true); } },
+                        { label: "Duplicate", icon: "copy", onClick: () => { setDupData({ ...c, display: "Copy of " + c.display }); setShowAdd("all"); } },
                         { divider: true },
                         { label: "Delete", icon: "trash", danger: true, onClick: () => setDeleteCred(c) },
                       ]}/>}
@@ -416,7 +420,8 @@ const CredentialsV2 = ({ empty }) => {
       {openId   && <CredentialDetailPanel credId={openId} startEdit={editId === openId} onClose={() => { setOpenId(null); setEditId(null); }} onRotate={(id) => { setRotateId(id); }} onDrift={(id) => { setOpenId(null); setDriftId(id); }} onHistory={(id) => setAuditCred(id)} onAssignOwner={(c) => setAssignOwner(c)} onDelete={(c) => setDeleteCred(c)}/>}
       {rotateId && <RotateNowModal credId={rotateId} onClose={() => setRotateId(null)} onComplete={(id) => { window.credStore.update(id, { rotation: "healthy", lastRotated: "just now" }); window.pamToast("Credential rotated successfully"); }}/>}
       {driftId  && <DriftPanel credId={driftId} onClose={() => setDriftId(null)}/>}
-      {showAdd  && <CredAddPanel prefill={dupData} onClose={() => { setShowAdd(false); setDupData(null); }} onCreated={(data) => { const cred = window.buildCredFromAddData(data); window.credStore.add(cred); flashNew(cred.id); window.pamToast(`${cred.display} added to vault`); }}/>}
+      {showAdd  && <CredAddPanel launchedFrom={showAdd} prefill={dupData} onClose={() => { setShowAdd(false); setDupData(null); }} onCreated={(data) => { const cred = window.buildCredFromAddData(data); window.credStore.add(cred); flashNew(cred.id); window.pamToast(`${cred.display} added to vault`); }}/>}
+      {showBgMark && <BreakGlassMarkModal onClose={() => setShowBgMark(false)} onMarked={(cred) => { window.pamToast(`${cred?.credentialDisplay || "Credential"} marked as break-glass-eligible`); }}/>}
       {showCsv  && <CSVImportPanel onClose={() => setShowCsv(false)}/>}
       {assignOwner && <AssignOwnerModal cred={assignOwner} onClose={() => setAssignOwner(null)} onSave={(owner) => { window.credStore.update(assignOwner.id, { owner }); window.pamToast(`Owner assigned — ${owner}`); }}/>}
       {deleteCred && <DeleteCredModal cred={deleteCred} onClose={() => setDeleteCred(null)} onConfirm={() => { window.credStore.remove(deleteCred.id); if (openId === deleteCred.id) setOpenId(null); window.pamToast(`${deleteCred.display} deleted from vault`); }}/>}

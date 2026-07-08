@@ -1,11 +1,26 @@
 // Credentials — Add Credential 4-step panel + success state
 // Note: depends on Panel, Field, Select, Toggle, Segmented, StepIndicator, Pill being on window
 
-const CredAddPanel = ({ onClose, onCreated, prefill }) => {
+// CredAddPanel — one wizard shape (Identity → Resources → Rotation →
+// Classification), five different Step 1 field sets depending on the
+// launchedFrom prop:
+//   "all"      — generic wizard, Credential Type toggle shown (default)
+//   "ssh"      — SSH Keys tab: no type toggle, private-key + passphrase + owner
+//   "secret"   — App Secrets tab: no type toggle, secret + application +
+//                type/injection as segmented + expiry
+//   "cloudiam" — Cloud/IAM Accounts tab: no type toggle, provider + account
+//                type + conditional (Root disables Rotation step; IAM adds
+//                scoped role + MFA)
+// Break-glass does NOT launch this panel — it opens the Credential Source
+// Picker in existingOnly mode via BreakGlassMarkModal.
+const CredAddPanel = ({ onClose, onCreated, prefill, launchedFrom = "all" }) => {
+  const initialType = launchedFrom === "ssh"    ? "SSH Key"
+                    : launchedFrom === "secret" ? "App Secret"
+                    : (prefill?.type || "Password");
   const [step, setStep] = React.useState(1);
   const [success, setSuccess] = React.useState(false);
   const [data, setData] = React.useState({
-    type: prefill?.type || "Password",
+    type: initialType,
     display: prefill?.display || "",
     username: prefill?.username && prefill.username !== "—" ? prefill.username : "",
     password: "",
@@ -20,6 +35,13 @@ const CredAddPanel = ({ onClose, onCreated, prefill }) => {
     secretExpiry: "",
     secretInjection: "Environment Variable",
     secretApp: "",
+    // Cloud/IAM-specific fields — used only when launchedFrom === "cloudiam".
+    cloudProvider: "AWS",
+    cloudAccountType: "iam",       // "root" | "iam"
+    cloudScopedRole: "",
+    cloudMfa: true,
+    cloudUsername: "",              // access key ID for AWS, similar for others
+    cloudSecret: "",                // secret access key
     resources: [],
     nonViewable: true,
     adminAcct: "",
@@ -53,7 +75,31 @@ const CredAddPanel = ({ onClose, onCreated, prefill }) => {
   const setD = (k, v) => setData(d => ({ ...d, [k]: v }));
   const setNP = (k, v) => setData(d => ({ ...d, newPolicy: { ...d.newPolicy, [k]: v } }));
 
-  const validStep1 = data.display.trim() && (data.type === "Password" ? data.username.trim() : data.type === "SSH Key" ? data.sshKey && data.sshOwner : data.secretValue);
+  // Cloud/IAM Root accounts are vaulted-only by design (see Cloud/IAM tab's
+  // stat header copy). Rotation step is shown for clarity but locked out.
+  const rotationDisabled = launchedFrom === "cloudiam" && data.cloudAccountType === "root";
+
+  const validStep1 =
+    launchedFrom === "ssh"      ? data.display.trim() && data.username.trim() && data.sshKey && data.sshOwner :
+    launchedFrom === "secret"   ? data.display.trim() && data.secretApp.trim() && data.secretValue :
+    launchedFrom === "cloudiam" ? data.display.trim() && data.cloudUsername.trim() && data.cloudSecret :
+    data.display.trim() && (data.type === "Password" ? data.username.trim() : data.type === "SSH Key" ? data.sshKey && data.sshOwner : data.secretValue);
+
+  // Advance step, skipping Rotation for Cloud/IAM Root accounts.
+  const nextStep = () => {
+    if (step === 2 && rotationDisabled) setStep(4);
+    else setStep(step + 1);
+  };
+  const prevStep = () => {
+    if (step === 4 && rotationDisabled) setStep(2);
+    else setStep(step - 1);
+  };
+
+  const panelTitle = prefill ? "Duplicate credential"
+                   : launchedFrom === "ssh"      ? "Add SSH key"
+                   : launchedFrom === "secret"   ? "Add secret"
+                   : launchedFrom === "cloudiam" ? "Add cloud credential"
+                   : "Add credential";
 
   if (success) {
     return <Panel title="Credential added" onClose={onClose}>
@@ -61,11 +107,11 @@ const CredAddPanel = ({ onClose, onCreated, prefill }) => {
     </Panel>;
   }
 
-  return <Panel title={prefill ? "Duplicate credential" : "Add credential"} onClose={onClose} back={step > 1 ? () => setStep(step - 1) : null}>
+  return <Panel title={panelTitle} onClose={onClose} back={step > 1 ? prevStep : null}>
     {prefill && step === 1 && <div style={{ margin: "12px 24px 0", padding: 10, background: "var(--warning-soft)", borderRadius: 6, font: "400 12px/1.5 var(--font-sans)", color: "var(--warning-fg)" }}>Password must be re-entered — secrets cannot be copied for security reasons.</div>}
-    <CredStepIndicator step={step}/>
+    <CredStepIndicator step={step} disabledSteps={rotationDisabled ? { 3: "Root accounts don't auto-rotate" } : null}/>
     <div className="scroll-area" style={{ flex: 1, overflow: "auto" }}>
-      {step === 1 && <Step1Identity data={data} setD={setD}/>}
+      {step === 1 && <Step1Identity data={data} setD={setD} launchedFrom={launchedFrom}/>}
       {step === 2 && <Step2Resources data={data} setD={setD}/>}
       {step === 3 && <Step3Rotation data={data} setD={setD} setNP={setNP}/>}
       {step === 4 && <Step4Classification data={data} setD={setD}/>}
@@ -73,33 +119,39 @@ const CredAddPanel = ({ onClose, onCreated, prefill }) => {
     <div style={{ borderTop: "1px solid var(--border)", padding: "12px 24px", display: "flex", alignItems: "center", gap: 8, background: "var(--bg-surface)" }}>
       <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
       <div style={{ flex: 1 }}/>
-      {step > 1 && <button className="btn" onClick={() => setStep(step - 1)}>← Back</button>}
-      {step < 4 && <button className="btn btn-primary" disabled={step === 1 && !validStep1} onClick={() => setStep(step + 1)}>
-        {step === 1 ? "Next: Resources →" : step === 2 ? "Next: Rotation →" : "Next: Classification →"}
+      {step > 1 && <button className="btn" onClick={prevStep}>← Back</button>}
+      {step < 4 && <button className="btn btn-primary" disabled={step === 1 && !validStep1} onClick={nextStep}>
+        {step === 1 ? "Next: Resources →" : step === 2 ? (rotationDisabled ? "Next: Classification →" : "Next: Rotation →") : "Next: Classification →"}
       </button>}
       {step === 4 && <button className="btn btn-primary" onClick={() => { setSuccess(true); onCreated?.(data); }}>Save credential</button>}
     </div>
   </Panel>;
 };
 
-const CredStepIndicator = ({ step }) => {
+const CredStepIndicator = ({ step, disabledSteps }) => {
   const steps = ["Identity", "Resources", "Rotation", "Classification"];
   return (
     <div style={{ display: "flex", alignItems: "center", padding: "14px 24px", gap: 8, borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-surface)" }}>
       {steps.map((s, i) => {
-        const done = step > i + 1;
-        const active = step === i + 1;
+        const stepNum = i + 1;
+        const disabled = disabledSteps?.[stepNum];
+        const done = step > stepNum && !disabled;
+        const active = step === stepNum;
         return (
           <React.Fragment key={s}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }} title={disabled || undefined}>
               <div style={{ width: 22, height: 22, borderRadius: "50%",
-                background: done ? "var(--success)" : active ? "var(--brand)" : "var(--bg-surface-2)",
-                color: done || active ? "#fff" : "var(--fg-3)",
+                background: disabled ? "var(--bg-surface-2)" : done ? "var(--success)" : active ? "var(--brand)" : "var(--bg-surface-2)",
+                color: disabled ? "var(--fg-4)" : (done || active) ? "#fff" : "var(--fg-3)",
                 display: "flex", alignItems: "center", justifyContent: "center",
                 font: "600 11px/1 var(--font-sans)",
-                border: !done && !active ? "1px solid var(--border)" : "none",
-              }}>{done ? <Icon name="check" size={11} color="#fff"/> : i + 1}</div>
-              <span style={{ font: `${active ? 600 : 500} 12.5px/1 var(--font-sans)`, color: active ? "var(--fg-1)" : done ? "var(--fg-2)" : "var(--fg-4)" }}>{s}</span>
+                border: disabled ? "1px dashed var(--border)" : (!done && !active ? "1px solid var(--border)" : "none"),
+                opacity: disabled ? 0.65 : 1,
+              }}>{disabled ? "—" : done ? <Icon name="check" size={11} color="#fff"/> : stepNum}</div>
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                <span style={{ font: `${active ? 600 : 500} 12.5px/1 var(--font-sans)`, color: disabled ? "var(--fg-4)" : active ? "var(--fg-1)" : done ? "var(--fg-2)" : "var(--fg-4)", textDecoration: disabled ? "line-through" : "none" }}>{s}</span>
+                {disabled && <span style={{ font: "400 10.5px/1.3 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>{disabled}</span>}
+              </div>
             </div>
             {i < steps.length - 1 && <div style={{ flex: 1, height: 1, background: done ? "var(--success)" : "var(--border)", maxWidth: 44 }}/>}
           </React.Fragment>
@@ -110,66 +162,34 @@ const CredStepIndicator = ({ step }) => {
 };
 
 // -------- STEP 1: IDENTITY --------
-const Step1Identity = ({ data, setD }) => (
-  <div style={{ padding: "20px 24px", maxWidth: 720, display: "flex", flexDirection: "column", gap: 16 }}>
-    <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7 }}>Credential identity</div>
+// Field set varies by launchedFrom. Reconciliation is not routed here — that
+// tab has its own purpose-built AddReconModal (unchanged, referenced as the
+// design model for these variants).
+const Step1Identity = ({ data, setD, launchedFrom = "all" }) => {
+  const scoped = launchedFrom !== "all";
 
-    <Field label="Display name" required hint="A recognizable name for this credential. Users see this — never the actual password.">
-      <input className="input" value={data.display} onChange={e => setD("display", e.target.value)} placeholder="prod-db-root or linux-server-01-admin"/>
-    </Field>
-
-    {data.type !== "App Secret" && (
-      <Field label="Username" required hint="The account username as it exists on the target system.">
-        <input className="input" value={data.username} onChange={e => setD("username", e.target.value)} placeholder="root"/>
+  // SSH Keys tab — Fix 1
+  if (launchedFrom === "ssh") return (
+    <div style={{ padding: "20px 24px", maxWidth: 720, display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7 }}>SSH key identity</div>
+      <Field label="Display name" required hint="A recognizable name for this key. Users see this — never the private material.">
+        <input className="input" value={data.display} onChange={e => setD("display", e.target.value)} placeholder="prod-bastion-deploy or ci-runner-key"/>
       </Field>
-    )}
-
-    <div className="field">
-      <label className="field-label">Credential type <span style={{ color: "var(--danger-fg)" }}>*</span></label>
-      <div style={{ display: "flex", gap: 0, background: "var(--bg-surface-2)", border: "1px solid var(--border)", borderRadius: 6, padding: 3 }}>
-        {["Password", "SSH Key", "App Secret"].map(t => (
-          <button key={t} onClick={() => setD("type", t)} style={{
-            flex: 1, padding: "7px 12px", border: "none",
-            background: data.type === t ? "var(--bg-app)" : "transparent",
-            color: data.type === t ? "var(--fg-1)" : "var(--fg-3)",
-            font: `${data.type === t ? 600 : 500} 12.5px/1 var(--font-sans)`,
-            borderRadius: 4, cursor: "pointer",
-            boxShadow: data.type === t ? "0 1px 2px rgba(0,0,0,0.06)" : "none",
-          }}>{t}</button>
-        ))}
-      </div>
-    </div>
-
-    {data.type === "Password" && <>
-      <Field label="Password" required hint="Password is encrypted at rest. You will not be able to view it after saving.">
-        <div style={{ display: "flex", gap: 6 }}>
-          <input className="input" type="password" value={data.password} onChange={e => setD("password", e.target.value)} placeholder="••••••••" style={{ flex: 1 }}/>
-          <button className="btn" style={{ flex: "none" }}><Icon name="eye" size={12}/></button>
+      <Field label="Username" required hint="The account username this key authenticates as on the target system.">
+        <input className="input" value={data.username} onChange={e => setD("username", e.target.value)} placeholder="deploy · ec2-user · root"/>
+      </Field>
+      <Field label="Private key" required hint="Upload a .pem / .key file, or paste PEM contents. Stored encrypted; never retrievable after save.">
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <button className="btn" style={{ alignSelf: "flex-start" }} onClick={() => setD("sshKey", "-----BEGIN OPENSSH PRIVATE KEY-----\n(demo — file upload not wired in this preview)\n-----END OPENSSH PRIVATE KEY-----")}>
+            <Icon name="upload" size={12}/> Upload .pem file
+          </button>
+          <textarea className="input" rows={4} value={data.sshKey} onChange={e => setD("sshKey", e.target.value)} placeholder="…or paste PEM content here" style={{ font: "400 11.5px/1.5 var(--font-mono)", resize: "vertical" }}/>
         </div>
-        <button className="btn btn-ghost btn-sm" style={{ alignSelf: "flex-start", padding: 0, marginTop: 6, color: "var(--brand-fg)" }} onClick={() => setD("password", "p#9KsLm@2vBxR7nQ!8jFw")}>Generate secure password</button>
-        {data.password && data.password.length >= 16 && (
-          <div style={{ marginTop: 8, padding: "8px 10px", background: "var(--success-soft)", borderRadius: 4, font: "500 11.5px/1.5 var(--font-sans)", color: "var(--success-fg)" }}>
-            <div style={{ marginBottom: 4 }}>✓ Length ≥ 16 characters</div>
-            <div style={{ marginBottom: 4 }}>✓ Uppercase, lowercase, numbers, symbols</div>
-            <div>✓ No ambiguous characters</div>
-          </div>
-        )}
       </Field>
-      <Toggle value={data.markComplete} onChange={v => setD("markComplete", v)} label="Mark as complete" hint="Turn on once you've verified this credential authenticates against its target system."/>
-    </>}
-
-    {data.type === "SSH Key" && <>
-      <Field label="Key type" required>
-        <Segmented value={data.sshKeyType} onChange={v => setD("sshKeyType", v)} options={[{ value: "Private Key", label: "Private Key" }, { value: "Certificate", label: "Certificate" }]}/>
-      </Field>
-      <Field label="Private key" required hint="Paste PEM content or upload a .pem / .key file.">
-        <textarea className="input" rows={4} value={data.sshKey} onChange={e => setD("sshKey", e.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----..." style={{ font: "400 11.5px/1.5 var(--font-mono)", resize: "vertical" }}/>
-        <button className="btn btn-ghost btn-sm" style={{ alignSelf: "flex-start", padding: 0, marginTop: 6, color: "var(--brand-fg)" }}><Icon name="upload" size={11}/> Upload .pem file instead</button>
-      </Field>
-      <Field label="Passphrase" hint="Required only if the key was created with a passphrase.">
+      <Field label="Passphrase" hint="Optional. Required only if the key was generated with one.">
         <input className="input" type="password" value={data.sshPassphrase} onChange={e => setD("sshPassphrase", e.target.value)} placeholder="••••••••"/>
       </Field>
-      <Field label="Key owner" required hint="Who owns and is responsible for this SSH key.">
+      <Field label="Owner" required hint="Captured here so an admin doesn't have to assign it in a second step. Populates the OWNER column immediately.">
         <Select value={data.sshOwner} onChange={v => setD("sshOwner", v)} options={[
           ["", "Select user…"],
           ["Arjun Bansal", "Arjun Bansal (Security Admin)"],
@@ -183,42 +203,173 @@ const Step1Identity = ({ data, setD }) => (
           <Fingerprint value="SHA256:Gc3BRK8MaLKNMKRuC8XaGvK3pYzT2+eH4kTfwXv9HWo" full/>
         </div>
       )}
-      <Toggle value={data.markComplete} onChange={v => setD("markComplete", v)} label="Mark as complete"/>
-    </>}
+    </div>
+  );
 
-    {data.type === "App Secret" && <>
-      <Field label="Secret name" required hint="A name for this secret, e.g. 'Stripe API Key — Production'">
+  // Application Secrets tab — Fix 2
+  if (launchedFrom === "secret") return (
+    <div style={{ padding: "20px 24px", maxWidth: 720, display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7 }}>Application secret</div>
+      <Field label="Secret name" required hint="e.g. 'Stripe API Key — Production'">
         <input className="input" value={data.display} onChange={e => setD("display", e.target.value)} placeholder="Stripe API Key — Production"/>
       </Field>
-      <Field label="Secret type" required>
-        <Select value={data.secretType} onChange={v => setD("secretType", v)} options={[
-          ["API Key", "API Key"],
-          ["OAuth Token", "OAuth Token"],
-          ["DB Connection String", "Database Connection String"],
-          ["Generic", "Generic Secret"],
+      <Field label="Type" required>
+        <Segmented value={data.secretType} onChange={v => setD("secretType", v)} options={[
+          { value: "API Key",              label: "API Key" },
+          { value: "OAuth Token",          label: "OAuth Token" },
+          { value: "DB Connection String", label: "DB Connection String" },
         ]}/>
       </Field>
-      <Field label="Secret value" required hint="Secret is encrypted. Not retrievable after save.">
-        <textarea className="input" rows={3} value={data.secretValue} onChange={e => setD("secretValue", e.target.value)} placeholder="sk_live_…" style={{ font: "400 12px/1.5 var(--font-mono)", resize: "vertical" }}/>
-      </Field>
-      <Field label="Expiry date" hint="If this secret expires, PAM will alert you before it does.">
-        <input className="input" type="date" value={data.secretExpiry} onChange={e => setD("secretExpiry", e.target.value)}/>
-      </Field>
-      <Field label="Injection method" hint="How applications will retrieve this secret after rotation.">
-        <Select value={data.secretInjection} onChange={v => setD("secretInjection", v)} options={[
-          ["Environment Variable", "Environment Variable"],
-          ["Config File", "Config File"],
-          ["API Call", "API Call"],
-          ["None", "None"],
-        ]}/>
-      </Field>
-      <Field label="Application name" hint="The application that uses this secret.">
+      <Field label="Application" required hint="Which application authenticates with this secret. Populates the APPLICATION column immediately.">
         <input className="input" value={data.secretApp} onChange={e => setD("secretApp", e.target.value)} placeholder="Stripe Payments"/>
       </Field>
-      <Toggle value={data.markComplete} onChange={v => setD("markComplete", v)} label="Mark as complete"/>
-    </>}
-  </div>
-);
+      <Field label="Injection method" required hint="How applications will retrieve this secret after rotation.">
+        <Segmented value={data.secretInjection} onChange={v => setD("secretInjection", v)} options={[
+          { value: "Environment Variable", label: "Env Variable" },
+          { value: "Config File",          label: "Config File" },
+          { value: "API Call",             label: "API Call" },
+        ]}/>
+      </Field>
+      <Field label="Secret value" required hint="Encrypted at rest. Not retrievable after save.">
+        <input className="input" type="password" value={data.secretValue} onChange={e => setD("secretValue", e.target.value)} placeholder="sk_live_…"/>
+      </Field>
+      <Field label="Expiry" hint="Optional. Leave blank for 'None'. PAM alerts before expiry if set.">
+        <input className="input" type="date" value={data.secretExpiry} onChange={e => setD("secretExpiry", e.target.value)}/>
+      </Field>
+    </div>
+  );
+
+  // Cloud/IAM Accounts tab — Fix 3
+  if (launchedFrom === "cloudiam") {
+    const root = data.cloudAccountType === "root";
+    return (
+      <div style={{ padding: "20px 24px", maxWidth: 720, display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7 }}>Cloud credential</div>
+        <Field label="Display name" required>
+          <input className="input" value={data.display} onChange={e => setD("display", e.target.value)} placeholder="aws-root-northwind · azure-service-principal-01"/>
+        </Field>
+        <Field label="Provider" required>
+          <Segmented value={data.cloudProvider} onChange={v => setD("cloudProvider", v)} options={[
+            { value: "AWS",   label: "AWS" },
+            { value: "Azure", label: "Azure" },
+            { value: "GCP",   label: "GCP" },
+          ]}/>
+        </Field>
+        <Field label="Account type" required>
+          <Segmented value={data.cloudAccountType} onChange={v => setD("cloudAccountType", v)} options={[
+            { value: "root", label: "Root" },
+            { value: "iam",  label: "IAM sub-account" },
+          ]}/>
+        </Field>
+        {root ? (
+          <div style={{ padding: 12, background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 6, font: "500 12.5px/1.5 var(--font-sans)", display: "flex", gap: 8, alignItems: "flex-start" }}>
+            <Icon name="lock" size={13} color="var(--warning-fg)" style={{ marginTop: 2 }}/>
+            <div>
+              <strong>Root accounts are vaulted-only by design.</strong> They never auto-rotate. The Rotation step will be skipped for this credential — it's shown as inactive on the wizard's step indicator so you know why.
+            </div>
+          </div>
+        ) : (
+          <>
+            <Field label="Scoped role / policy" hint="e.g. AmazonRDSFullAccess · Reader — the least-privilege scope this sub-account operates under.">
+              <input className="input" value={data.cloudScopedRole} onChange={e => setD("cloudScopedRole", e.target.value)} placeholder="e.g. AmazonRDSReadOnlyAccess"/>
+            </Field>
+            <Toggle value={data.cloudMfa} onChange={v => setD("cloudMfa", v)} label="MFA enabled" hint="Populates the MFA column immediately. Required for Critical scope in most compliance frameworks."/>
+          </>
+        )}
+        <Field label={data.cloudProvider === "AWS" ? "Access key ID" : "Username"} required>
+          <input className="input t-mono" value={data.cloudUsername} onChange={e => setD("cloudUsername", e.target.value)} placeholder={data.cloudProvider === "AWS" ? "AKIA…" : "svc-user@tenant"}/>
+        </Field>
+        <Field label={data.cloudProvider === "AWS" ? "Secret access key" : "Password / secret"} required hint="Encrypted at rest. Not retrievable after save.">
+          <input className="input t-mono" type="password" value={data.cloudSecret} onChange={e => setD("cloudSecret", e.target.value)} placeholder="••••••••"/>
+        </Field>
+      </div>
+    );
+  }
+
+  // All Credentials tab (default) — unchanged generic wizard, Credential Type
+  // toggle stays because this is the ONE flow where the admin hasn't already
+  // told the system what type they're adding.
+  return (
+    <div style={{ padding: "20px 24px", maxWidth: 720, display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7 }}>Credential identity</div>
+
+      <Field label="Display name" required hint="A recognizable name for this credential. Users see this — never the actual password.">
+        <input className="input" value={data.display} onChange={e => setD("display", e.target.value)} placeholder="prod-db-root or linux-server-01-admin"/>
+      </Field>
+
+      {data.type !== "App Secret" && (
+        <Field label="Username" required hint="The account username as it exists on the target system.">
+          <input className="input" value={data.username} onChange={e => setD("username", e.target.value)} placeholder="root"/>
+        </Field>
+      )}
+
+      <div className="field">
+        <label className="field-label">Credential type <span style={{ color: "var(--danger-fg)" }}>*</span></label>
+        <div style={{ display: "flex", gap: 0, background: "var(--bg-surface-2)", border: "1px solid var(--border)", borderRadius: 6, padding: 3 }}>
+          {["Password", "SSH Key", "App Secret"].map(t => (
+            <button key={t} onClick={() => setD("type", t)} style={{
+              flex: 1, padding: "7px 12px", border: "none",
+              background: data.type === t ? "var(--bg-app)" : "transparent",
+              color: data.type === t ? "var(--fg-1)" : "var(--fg-3)",
+              font: `${data.type === t ? 600 : 500} 12.5px/1 var(--font-sans)`,
+              borderRadius: 4, cursor: "pointer",
+              boxShadow: data.type === t ? "0 1px 2px rgba(0,0,0,0.06)" : "none",
+            }}>{t}</button>
+          ))}
+        </div>
+      </div>
+
+      {data.type === "Password" && <>
+        <Field label="Password" required hint="Password is encrypted at rest. You will not be able to view it after saving.">
+          <div style={{ display: "flex", gap: 6 }}>
+            <input className="input" type="password" value={data.password} onChange={e => setD("password", e.target.value)} placeholder="••••••••" style={{ flex: 1 }}/>
+            <button className="btn" style={{ flex: "none" }}><Icon name="eye" size={12}/></button>
+          </div>
+          <button className="btn btn-ghost btn-sm" style={{ alignSelf: "flex-start", padding: 0, marginTop: 6, color: "var(--brand-fg)" }} onClick={() => setD("password", "p#9KsLm@2vBxR7nQ!8jFw")}>Generate secure password</button>
+        </Field>
+        <Toggle value={data.markComplete} onChange={v => setD("markComplete", v)} label="Mark as complete" hint="Turn on once you've verified this credential authenticates against its target system."/>
+      </>}
+
+      {data.type === "SSH Key" && <>
+        <Field label="Private key" required hint="Paste PEM content or upload a .pem / .key file.">
+          <textarea className="input" rows={4} value={data.sshKey} onChange={e => setD("sshKey", e.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----..." style={{ font: "400 11.5px/1.5 var(--font-mono)", resize: "vertical" }}/>
+        </Field>
+        <Field label="Passphrase"><input className="input" type="password" value={data.sshPassphrase} onChange={e => setD("sshPassphrase", e.target.value)} placeholder="••••••••"/></Field>
+        <Field label="Key owner" required>
+          <Select value={data.sshOwner} onChange={v => setD("sshOwner", v)} options={[
+            ["", "Select user…"],
+            ["Arjun Bansal", "Arjun Bansal (Security Admin)"],
+            ["Priya Nair",   "Priya Nair (IT Ops)"],
+            ["Rohan Mehta",  "Rohan Mehta (SysAdmin)"],
+          ]}/>
+        </Field>
+      </>}
+
+      {data.type === "App Secret" && <>
+        <Field label="Secret name" required><input className="input" value={data.display} onChange={e => setD("display", e.target.value)} placeholder="Stripe API Key — Production"/></Field>
+        <Field label="Secret type" required>
+          <Select value={data.secretType} onChange={v => setD("secretType", v)} options={[
+            ["API Key", "API Key"],
+            ["OAuth Token", "OAuth Token"],
+            ["DB Connection String", "Database Connection String"],
+            ["Generic", "Generic Secret"],
+          ]}/>
+        </Field>
+        <Field label="Secret value" required><textarea className="input" rows={3} value={data.secretValue} onChange={e => setD("secretValue", e.target.value)} placeholder="sk_live_…" style={{ font: "400 12px/1.5 var(--font-mono)", resize: "vertical" }}/></Field>
+        <Field label="Expiry date"><input className="input" type="date" value={data.secretExpiry} onChange={e => setD("secretExpiry", e.target.value)}/></Field>
+        <Field label="Injection method">
+          <Select value={data.secretInjection} onChange={v => setD("secretInjection", v)} options={[
+            ["Environment Variable", "Environment Variable"],
+            ["Config File", "Config File"],
+            ["API Call", "API Call"],
+            ["None", "None"],
+          ]}/>
+        </Field>
+        <Field label="Application name"><input className="input" value={data.secretApp} onChange={e => setD("secretApp", e.target.value)} placeholder="Stripe Payments"/></Field>
+      </>}
+    </div>
+  );
+};
 
 // -------- STEP 2: RESOURCES --------
 const Step2Resources = ({ data, setD }) => {
