@@ -29,8 +29,20 @@ const bgSoftStrong = "color-mix(in oklch, #7B3EA8 20%, transparent)";
       resourceScope: "all",         // all | tags | specific
     },
     active: null,
-    open: null,                     // 'trigger' | 'monitor'
+    open: null,                     // 'trigger' | 'monitor' | 'extend' | 'terminate' | 'recipient-launch' | 'recipient-mfa' | 'post-session'
     reviewOpen: null,
+    // Live-session data — populated when a grant occurs, drained on endSession.
+    activity: [],                   // [{ ts, kind: 'query'|'command'|'access', text, risk, result }]
+    audit: [],                      // [{ ts, kind, actor, message }]
+    riskScore: 0,                   // 0–100, computed from activity
+    pollTimer: null,                // handle for the 5s poll simulator
+    // Recipient-side simulation. In production this would be its own user context;
+    // here we let the admin flip into the recipient's view for demo purposes.
+    recipientView: false,
+    recipientMfaState: "idle",      // 'idle' | 'verifying' | 'done' | 'fail'
+    // Post-session form (Screen 13c). Filled by the recipient when the session
+    // ends and stored on the review record.
+    postSession: { desc: "", commands: "", incidentResult: "", lessons: "" },
     reviews: [
       { id: "BG-2042", recipient: "Rohan Mehta", initiator: "Arjun Bansal", resource: "ledger-mongo-cluster", severity: "P1", started: "May 14, 2026 · 00:12", ended: "May 14, 2026 · 02:38", duration: "2h 26m", justification: "P0 incident — replica lag >120s, customer-facing writes failing. Needed emergency DB access to force resync.", ticket: "PD-8841", status: "pending", credential: "ledger-mongo-admin", rotated: false, commands: 47 },
       { id: "BG-2039", recipient: "Priya Iyer", initiator: "Arjun Bansal", resource: "oracle-reporting", severity: "P2", started: "May 11, 2026 · 22:04", ended: "May 11, 2026 · 23:30", duration: "1h 26m", justification: "Reporting pipeline stalled before quarter-close; emergency access to clear locked sessions.", ticket: "PD-8790", status: "reviewed", reviewedBy: "Dana Whitley", reviewedOn: "May 12, 2026", outcome: "appropriate", credential: "oracle-dba-01", rotated: true, commands: 23 },
@@ -41,18 +53,124 @@ const bgSoftStrong = "color-mix(in oklch, #7B3EA8 20%, transparent)";
     subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
     openTrigger: () => { store.open = "trigger"; store.emit(); },
     openMonitor: () => { store.open = "monitor"; store.emit(); },
+    openExtend: () => { store.open = "extend"; store.emit(); },
+    openTerminate: () => { store.open = "terminate"; store.emit(); },
+    openRecipientLaunch: () => { store.recipientView = true; store.open = "recipient-launch"; store.emit(); },
+    openRecipientMfa: () => { store.open = "recipient-mfa"; store.emit(); },
+    openPostSession: () => { store.open = "post-session"; store.emit(); },
+    exitRecipientView: () => { store.recipientView = false; store.open = "monitor"; store.emit(); },
     close: () => { store.open = null; store.emit(); },
     // grant() records the active session but does NOT auto-open the monitor.
     // The caller controls what to show next (the trigger flow's "done" screen
     // has its own "Monitor live session →" button that explicitly opens it).
-    grant: (session) => { store.active = { ...session, id: session.id || "BG-" + Math.floor(2050 + Math.random() * 900), grantedAt: session.grantedAt || Date.now() }; store.emit(); },
-    extend: (hrs) => { if (store.active) { store.active.expiresHrs = (store.active.expiresHrs || 0) + hrs; store.active.extended = true; store.emit(); } },
-    endSession: () => {
+    grant: (session) => {
+      const now = session.grantedAt || Date.now();
+      store.active = { ...session, id: session.id || "BG-" + Math.floor(2050 + Math.random() * 900), grantedAt: now, commands: 0, extended: false };
+      // Seed audit trail — every audit-worthy event since grant lands here.
+      store.audit = [
+        { ts: now,        kind: "grant",   actor: session.initiator || "Arjun Bansal", message: `Emergency access granted to ${session.recipient} (${(session.durationHrs || 4)}h)` },
+        { ts: now + 1200, kind: "mfa",     actor: "system",      message: `MFA verified for ${session.initiator || "admin"}` },
+        { ts: now + 2400, kind: "notify",  actor: "system",      message: `Recipient ${session.recipient} notified via email + in-app` },
+        { ts: now + 3600, kind: "notify",  actor: "system",      message: `Security team notified · 2 recipients` },
+      ];
+      store.activity = [];
+      store.riskScore = 0;
+      store.postSession = { desc: "", commands: "", incidentResult: "", lessons: "" };
+      store.recipientView = false;
+      store.recipientMfaState = "idle";
+      store.startPoll();
+      store.emit();
+    },
+    extend: (hrs, reason) => {
+      if (!store.active) return;
+      const capped = Math.min(4, Math.max(1, hrs));
+      store.active.expiresHrs = (store.active.expiresHrs || 0) + capped;
+      store.active.extended = true;
+      store.audit = [...store.audit, { ts: Date.now(), kind: "extend", actor: "Arjun Bansal", message: `Session extended by ${capped}h · reason: ${reason || "—"}` }];
+      store.open = "monitor";
+      store.emit();
+    },
+    logCommand: (text, risk) => {
+      if (!store.active) return;
+      const entry = { ts: Date.now(), kind: "command", text, risk: risk || "low", result: "ok" };
+      store.activity = [...store.activity, entry];
+      store.active.commands = (store.active.commands || 0) + 1;
+      // Simple risk model: each medium adds 12, each high adds 22 (capped at 100).
+      const bump = risk === "high" ? 22 : risk === "medium" ? 12 : 4;
+      store.riskScore = Math.min(100, store.riskScore + bump);
+      store.emit();
+    },
+    startPoll: () => {
+      if (store.pollTimer) return;
+      // Deterministic pool of commands cycled through, weighted so the
+      // longer a session runs the more likely a medium/high-risk operation appears.
+      // Simulates a live feed without needing a real backend.
+      const script = [
+        { text: "SHOW replica status on ledger-mongo-primary",                                risk: "low" },
+        { text: "db.adminCommand({ replSetGetStatus: 1 })",                                    risk: "low" },
+        { text: "systemctl status mongod",                                                     risk: "low" },
+        { text: "tail -100 /var/log/mongodb/mongod.log",                                       risk: "low" },
+        { text: "db.oplog.rs.find().sort({$natural:-1}).limit(5)",                             risk: "medium" },
+        { text: "rs.stepDown(60)",                                                             risk: "high" },
+        { text: "db.currentOp({secs_running: {$gt: 30}})",                                     risk: "medium" },
+        { text: "kill -9 <pid> on long-running query",                                         risk: "high" },
+        { text: "rs.reconfig(cfg, {force: true})",                                             risk: "high" },
+        { text: "db.collection.stats()",                                                       risk: "low" },
+      ];
+      let i = 0;
+      store.pollTimer = setInterval(() => {
+        if (!store.active) return;
+        const item = script[i % script.length]; i++;
+        store.logCommand(item.text, item.risk);
+      }, 5000);
+    },
+    stopPoll: () => {
+      if (store.pollTimer) { clearInterval(store.pollTimer); store.pollTimer = null; }
+    },
+    endSession: (opts) => {
       if (!store.active) return;
       const a = store.active;
-      const rev = { id: a.id, recipient: a.recipient, initiator: a.initiator || "Arjun Bansal", resource: a.resource, severity: a.severity, started: "just now", ended: "just now", duration: "—", justification: a.justification, ticket: a.ticket, status: "pending", credential: a.credential, rotated: false, commands: a.commands || 0 };
+      store.stopPoll();
+      const terminatedNote = opts?.terminatedReason ? ` · Terminated: ${opts.terminatedReason}` : "";
+      const rev = {
+        id: a.id, recipient: a.recipient, initiator: a.initiator || "Arjun Bansal",
+        resource: a.resource, severity: a.severity,
+        started: "just now", ended: "just now", duration: "—",
+        justification: a.justification, ticket: a.ticket,
+        status: "pending", credential: a.credential, rotated: false,
+        commands: a.commands || 0,
+        activity: store.activity,
+        audit: [...store.audit, { ts: Date.now(), kind: opts?.terminatedReason ? "terminate" : "expire", actor: "Arjun Bansal", message: opts?.terminatedReason ? `Session terminated by admin${terminatedNote}` : "Session ended (window expired or user-ended)" }],
+        riskScore: store.riskScore,
+        postSession: null,             // filled in by openPostSession → savePostSession
+      };
       store.reviews = [rev, ...store.reviews];
-      store.active = null; store.open = null; store.reviewOpen = rev;
+      store.active = null;
+      store.activity = [];
+      // Leave audit intact so the post-session form shows history.
+      store.open = "post-session";
+      store.reviewOpen = null;         // review comes AFTER post-session form
+      store.pendingReview = rev;       // stash for post-session → review handoff
+      store.emit();
+    },
+    savePostSession: (form) => {
+      const rev = store.pendingReview;
+      if (rev) {
+        rev.postSession = form;
+        store.reviews = store.reviews.map(r => r.id === rev.id ? rev : r);
+      }
+      store.postSession = form;
+      store.pendingReview = null;
+      store.open = null;
+      store.reviewOpen = rev;
+      store.audit = [];
+      store.emit();
+    },
+    submitRecipientMfa: (success) => {
+      store.recipientMfaState = success ? "done" : "fail";
+      if (success) {
+        store.audit = [...store.audit, { ts: Date.now(), kind: "connect", actor: store.active?.recipient || "recipient", message: "Recipient connected to session (MFA re-verified)" }];
+      }
       store.emit();
     },
     openReview: (rev) => { store.reviewOpen = rev; store.emit(); },
@@ -817,7 +935,7 @@ const BGFloatingIndicator = () => {
         <button className="btn btn-sm" style={{ background: BG, color: "#fff", borderColor: "transparent", flex: 1 }} onClick={() => window.bgStore.openMonitor()}>
           Monitor
         </button>
-        <button className="btn btn-ghost btn-sm" style={{ color: "var(--danger-fg)", flex: "none" }} onClick={() => { window.bgStore.endSession(); window.pamToast("Session revoked", "info"); }}>
+        <button className="btn btn-ghost btn-sm" style={{ color: "var(--danger-fg)", flex: "none" }} onClick={() => window.bgStore.openTerminate()}>
           Revoke
         </button>
       </div>
@@ -826,86 +944,525 @@ const BGFloatingIndicator = () => {
 };
 
 // =========================================================
-// ACTIVE MONITOR PANEL
+// ACTIVE MONITOR — full-screen 3-column live view.
+// Left: session context + mandatory controls
+// Center: live activity feed (polling every 5s via bgStore.startPoll)
+// Right: system audit log
+// Footer: countdown · Extend · Terminate
 // =========================================================
-const BGMonitorPanel = () => {
-  const a = window.bgStore.active;
-  const cfg = window.bgStore.config;
-  const [confirmEnd, setConfirmEnd] = React.useState(false);
-  if (!a) return null;
-  const remaining = (a.expiresHrs || a.durationHrs) + "h 00m";
-  return (
-    <>
-      <div onClick={() => window.bgStore.close()} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.2)", zIndex: 40 }}/>
-      <aside style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 520, background: "var(--bg-app)", borderLeft: `1px solid ${BG}`, zIndex: 41, display: "flex", flexDirection: "column", boxShadow: "var(--shadow-lg)" }}>
-        <div style={{ padding: "16px 20px", background: bgSoft, borderBottom: `1px solid ${BG}`, display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 18 }}>⚡</span>
-          <div style={{ flex: 1 }}>
-            <div style={{ font: "700 15px/1.2 var(--font-sans)", color: BG }}>Active Break-Glass Session</div>
-            <div style={{ font: "400 12px/1.4 var(--font-sans)", color: "var(--fg-3)", marginTop: 2 }}>{a.id} · {a.recipient}</div>
-          </div>
-          <button className="btn btn-ghost btn-icon" onClick={() => window.bgStore.close()}><Icon name="x" size={14}/></button>
-        </div>
-
-        <div className="scroll-area" style={{ flex: 1, overflow: "auto", padding: 20, display: "flex", flexDirection: "column", gap: 20 }}>
-          {/* Countdown */}
-          <div style={{ padding: 16, border: `1px solid ${BG}`, borderRadius: 10, background: bgSoft, textAlign: "center" }}>
-            <div style={{ font: "500 11px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>Time remaining</div>
-            <div style={{ font: "700 32px/1.1 var(--font-mono)", color: BG, marginTop: 6 }}>{remaining}</div>
-            <div style={{ font: "400 11.5px/1 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>Expires automatically · {a.durationHrs}h window{a.extended ? " (extended)" : ""}</div>
-          </div>
-
-          <div>
-            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7, marginBottom: 10 }}>Session</div>
-            <BGRow k="Recipient">{a.recipient}</BGRow>
-            <BGRow k="Resource"><span className="t-mono">{a.resource}</span></BGRow>
-            <BGRow k="Severity"><SeverityBadge level={a.severity}/></BGRow>
-            <BGRow k="Credential"><span className="t-mono">{a.credential}</span></BGRow>
-            <BGRow k="Ticket">{a.ticket}</BGRow>
-            <BGRow k="Commands run">{a.commands || 0}</BGRow>
-          </div>
-
-          <div>
-            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7, marginBottom: 8 }}>Justification</div>
-            <div style={{ padding: 12, background: "var(--bg-surface-2)", borderRadius: 8, font: "400 12.5px/1.6 var(--font-sans)", color: "var(--fg-2)" }}>{a.justification}</div>
-          </div>
-
-          <div>
-            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7, marginBottom: 8 }}>Mandatory controls (active)</div>
-            {[["Session recording", "Recording now"], ["Keystroke logging", "Capturing"], ["MFA re-verification", "Verified at grant"], ["Post-incident review", "Required on end"], ["Credential rotation", "Within 24h of end"]].map(([k, v]) => (
-              <div key={k} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 0", font: "400 12.5px/1.4 var(--font-sans)" }}>
-                <span style={{ color: "var(--success-fg)" }}>🔒</span>
-                <span style={{ flex: 1, color: "var(--fg-1)" }}>{k}</span>
-                <span style={{ color: "var(--success-fg)", font: "500 11.5px/1 var(--font-sans)" }}>{v}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)", display: "flex", gap: 8, background: "var(--bg-surface)" }}>
-          <button className="btn" onClick={() => window.pamToast("Opening live session view…", "info")}><Icon name="eye" size={12}/> Watch live</button>
-          {cfg.extensionAllowed && !a.extended && <button className="btn" onClick={() => { window.bgStore.extend(2); window.pamToast("Access extended by 2 hours"); }}>Extend +2h</button>}
-          <div style={{ flex: 1 }}/>
-          <button className="btn" style={{ background: BG, color: "#fff", borderColor: BG }} onClick={() => setConfirmEnd(true)}>End session</button>
-        </div>
-      </aside>
-
-      {confirmEnd && (
-        <ConfirmModal title={`End break-glass session for ${a.recipient}?`}
-          body="The session will end immediately and the mandatory post-incident review will open. The credential used will be scheduled for rotation within 24 hours."
-          confirmLabel="End & start review"
-          onConfirm={() => { window.bgStore.endSession(); window.pamToast("Session ended — review required · credential rotation scheduled", "info"); }}
-          onClose={() => setConfirmEnd(false)}/>
-      )}
-    </>
-  );
-};
 const BGRow = ({ k, children }) => (
-  <div style={{ display: "grid", gridTemplateColumns: "130px 1fr", gap: 12, padding: "5px 0", alignItems: "center" }}>
+  <div style={{ display: "grid", gridTemplateColumns: "130px 1fr", gap: 10, padding: "5px 0", alignItems: "center" }}>
     <span style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-4)" }}>{k}</span>
     <span style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-1)" }}>{children}</span>
   </div>
 );
+
+const BGRiskBar = ({ score }) => {
+  const color = score >= 70 ? "var(--danger-fg)" : score >= 40 ? "var(--warning-fg)" : "var(--success-fg)";
+  const label = score >= 70 ? "High" : score >= 40 ? "Elevated" : "Low";
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
+        <span style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>Live risk score</span>
+        <span style={{ font: "700 15px/1 var(--font-sans)", color }}>{Math.round(score)} <span style={{ font: "500 11px/1 var(--font-sans)", color: "var(--fg-4)", marginLeft: 4 }}>· {label}</span></span>
+      </div>
+      <div style={{ height: 8, background: "var(--bg-surface-2)", borderRadius: 4, overflow: "hidden" }}>
+        <div style={{ width: `${Math.min(100, score)}%`, height: "100%", background: color, transition: "width 0.4s ease-out" }}/>
+      </div>
+    </div>
+  );
+};
+
+const BGMonitorPanel = () => {
+  const store = window.useBreakGlass();
+  const a = store.active;
+  const cfg = store.config;
+  const [now, setNow] = React.useState(Date.now());
+  const feedRef = React.useRef(null);
+  React.useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  React.useEffect(() => {
+    // Auto-scroll to bottom on new activity — like a real terminal tail.
+    if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight;
+  }, [store.activity.length]);
+  if (!a) return null;
+
+  const grantedAt = a.grantedAt || now;
+  const totalMs = (a.expiresHrs || a.durationHrs || 4) * 3600 * 1000;
+  const remainingMs = Math.max(0, totalMs - (now - grantedAt));
+  const hh = Math.floor(remainingMs / 3600000);
+  const mm = Math.floor((remainingMs % 3600000) / 60000);
+  const ss = Math.floor((remainingMs % 60000) / 1000);
+  const countdown = `${String(hh).padStart(2,"0")}:${String(mm).padStart(2,"0")}:${String(ss).padStart(2,"0")}`;
+  const warn = remainingMs < 30 * 60 * 1000;
+  const fmtTime = (ts) => new Date(ts).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "#fff", display: "flex", flexDirection: "column" }}>
+      <BGChromeHeader title={`Active Break-Glass Session · ${a.id} · ${a.recipient} → ${a.resource}`}/>
+      <BGConsequenceBanner>Live session · commands are being recorded and streamed to the audit trail. Terminate immediately if activity looks unexpected.</BGConsequenceBanner>
+
+      {/* 3-column body */}
+      <div style={{ flex: 1, display: "grid", gridTemplateColumns: "300px 1fr 340px", gap: 0, minHeight: 0 }}>
+        {/* LEFT — Session + Controls */}
+        <aside style={{ padding: 16, borderRight: "1px solid var(--border)", overflow: "auto", display: "flex", flexDirection: "column", gap: 18, background: "var(--bg-app)" }}>
+          <div>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>Session</div>
+            <BGRow k="Recipient">{a.recipient}</BGRow>
+            <BGRow k="Resource"><span className="t-mono">{a.resource}</span></BGRow>
+            <BGRow k="Severity"><SeverityBadge level={a.severity}/></BGRow>
+            <BGRow k="Credential"><span className="t-mono">{a.credential}</span></BGRow>
+            <BGRow k="Ticket">{a.ticket || "—"}</BGRow>
+            <BGRow k="Reason">{a.reason || "—"}</BGRow>
+            <BGRow k="Commands run">{a.commands || 0}</BGRow>
+          </div>
+
+          <div>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 8 }}>Justification</div>
+            <div style={{ padding: 10, background: "var(--bg-surface-2)", borderRadius: 6, font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-2)" }}>
+              {a.justification && a.justification.length > 160 ? a.justification.slice(0, 160) + "…" : a.justification}
+            </div>
+          </div>
+
+          <div>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 8 }}>Mandatory controls (active)</div>
+            {[["Session recording", "Recording"], ["Keystroke logging", "Capturing"], ["MFA re-verification", "Verified"], ["Post-incident review", "Required on end"], ["Credential rotation", "Within 24h"]].map(([k, v]) => (
+              <div key={k} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", font: "400 12px/1.4 var(--font-sans)" }}>
+                <span style={{ color: "var(--success-fg)" }}>🔒</span>
+                <span style={{ flex: 1, color: "var(--fg-1)" }}>{k}</span>
+                <span style={{ color: "var(--success-fg)", font: "500 11px/1 var(--font-sans)" }}>{v}</span>
+              </div>
+            ))}
+          </div>
+
+          <button className="btn" onClick={() => window.bgStore.openRecipientLaunch()} style={{ marginTop: "auto", fontSize: 12 }}>
+            <Icon name="user" size={12}/> Preview recipient view
+          </button>
+        </aside>
+
+        {/* CENTER — Live activity feed */}
+        <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12, minHeight: 0, background: "var(--bg-surface)" }}>
+          <div style={{ padding: 12, border: "1px solid var(--border)", borderRadius: 6, background: "#fff" }}>
+            <BGRiskBar score={store.riskScore}/>
+            <div style={{ marginTop: 8, font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-3)" }}>
+              Contributing factors: {store.activity.filter(a => a.risk === "high").length} high-risk command{store.activity.filter(a => a.risk === "high").length === 1 ? "" : "s"} · {store.activity.filter(a => a.risk === "medium").length} medium-risk · {store.activity.filter(a => a.risk === "low").length} low-risk.
+            </div>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>Live activity feed</div>
+            <div style={{ font: "500 11px/1 var(--font-sans)", color: "var(--success-fg)", display: "flex", alignItems: "center", gap: 5 }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--success-fg)", animation: "bgPulse 1.5s infinite" }}/>
+              Polling every 5s
+            </div>
+          </div>
+
+          <div ref={feedRef} className="scroll-area" style={{ flex: 1, overflow: "auto", padding: 12, background: "#0F1115", borderRadius: 6, font: "500 12px/1.55 var(--font-mono)", color: "#DFE3E8", minHeight: 0 }}>
+            {store.activity.length === 0 ? (
+              <div style={{ color: "#6B7280", fontStyle: "italic" }}>Waiting for first command from {a.recipient}…</div>
+            ) : store.activity.map((ev, i) => {
+              const riskColor = ev.risk === "high" ? "#F87171" : ev.risk === "medium" ? "#FBBF24" : "#9CA3AF";
+              return (
+                <div key={i} style={{ display: "flex", gap: 10, padding: "3px 0" }}>
+                  <span style={{ color: "#6B7280", flex: "none" }}>{fmtTime(ev.ts)}</span>
+                  <span style={{ color: riskColor, flex: "none", width: 60 }}>{ev.risk.toUpperCase()}</span>
+                  <span style={{ color: "#DFE3E8", flex: 1 }}>{ev.text}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* RIGHT — System audit log */}
+        <aside style={{ padding: 16, borderLeft: "1px solid var(--border)", overflow: "auto", background: "var(--bg-app)" }}>
+          <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>System audit log</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {store.audit.slice().reverse().map((ev, i) => {
+              const icon = ev.kind === "grant" ? "shield" : ev.kind === "mfa" ? "key" : ev.kind === "notify" ? "bell" : ev.kind === "extend" ? "clock" : ev.kind === "connect" ? "check" : ev.kind === "terminate" ? "x" : "info";
+              return (
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: 8, background: "var(--bg-surface)", borderRadius: 4 }}>
+                  <div style={{ width: 22, height: 22, borderRadius: "50%", background: bgSoft, color: BG, display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
+                    <Icon name={icon} size={11}/>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ font: "500 11.5px/1.4 var(--font-sans)", color: "var(--fg-1)" }}>{ev.message}</div>
+                    <div className="t-tiny" style={{ color: "var(--fg-4)", marginTop: 2 }}>{fmtTime(ev.ts)} · {ev.actor}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </aside>
+      </div>
+
+      {/* FOOTER */}
+      <div style={{ padding: "12px 20px", borderTop: `1px solid ${BG}`, background: "#1A1916", color: "#fff", display: "flex", alignItems: "center", gap: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 16 }}>⏱</span>
+          <div>
+            <div className="t-mono" style={{ font: `700 22px/1 var(--font-mono)`, color: warn ? "#F87171" : "#fff" }}>{countdown}</div>
+            <div className="t-tiny" style={{ color: "#9CA3AF", marginTop: 2 }}>remaining · {a.durationHrs}h window{a.extended ? " (extended)" : ""}</div>
+          </div>
+        </div>
+        <div style={{ flex: 1 }}/>
+        <button className="btn" onClick={() => window.bgStore.close()} style={{ background: "transparent", color: "#DFE3E8", borderColor: "#374151" }}>
+          Close (session continues)
+        </button>
+        {cfg.extensionAllowed && !a.extended && (
+          <button className="btn" onClick={() => window.bgStore.openExtend()} style={{ background: "#374151", color: "#fff", borderColor: "transparent" }}>
+            <Icon name="clock" size={12}/> Extend session
+          </button>
+        )}
+        <button className="btn" onClick={() => window.bgStore.openTerminate()} style={{ background: "#C0392B", color: "#fff", borderColor: "transparent", fontWeight: 700 }}>
+          <Icon name="alert-triangle" size={12}/> Terminate now
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// =========================================================
+// EXTEND MODAL
+// =========================================================
+const BGExtendModal = () => {
+  const cfg = window.bgStore.config;
+  const a = window.bgStore.active;
+  const [hrs, setHrs] = React.useState(2);
+  const [reason, setReason] = React.useState("");
+  if (!a) return null;
+  const capped = Math.min(4, Math.max(1, hrs));
+  const canConfirm = reason.trim().length >= 30;
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 320, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div style={{ width: 520, maxWidth: "94vw", background: "#fff", border: `2px solid ${BG}`, borderRadius: 8, boxShadow: "0 24px 60px rgba(0,0,0,0.4)", overflow: "hidden" }}>
+        <div style={{ padding: "14px 20px", background: BG, color: "#fff", font: "700 14px/1.2 var(--font-sans)" }}>
+          Extend emergency session — {a.id}
+        </div>
+        <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ padding: 12, background: "#FCEBEB", borderLeft: "3px solid #C0392B", color: "#7A1B12", font: "500 12px/1.4 var(--font-sans)", borderRadius: "0 4px 4px 0" }}>
+            Extensions are one-time and capped at +{cfg.extensionAllowed ? 4 : 0}h. A secondary admin is notified in real time.
+          </div>
+          <Field label="Extend by (hours)" required hint="Max 4 additional hours">
+            <div style={{ display: "flex", gap: 6 }}>
+              {[1, 2, 3, 4].map(h => (
+                <button key={h} onClick={() => setHrs(h)} style={{ flex: 1, padding: "10px 0", border: `1.5px solid ${capped === h ? BG : "var(--border)"}`, background: capped === h ? bgSoft : "#fff", color: capped === h ? BG : "var(--fg-2)", font: `${capped === h ? 700 : 500} 13.5px/1 var(--font-sans)`, borderRadius: 6, cursor: "pointer" }}>
+                  +{h}h
+                </button>
+              ))}
+            </div>
+          </Field>
+          <Field label="Why is more time needed?" required hint="30 chars minimum — this appears on the audit record.">
+            <textarea className="input" rows={3} value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. Replica sync taking longer than expected; need to verify oplog catch-up before disconnecting."/>
+            <div style={{ marginTop: 4, font: "400 11px/1 var(--font-sans)", color: canConfirm ? "var(--success-fg)" : "var(--fg-4)" }}>{reason.length} / 30 min</div>
+          </Field>
+        </div>
+        <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)", display: "flex", gap: 8, justifyContent: "flex-end", background: "var(--bg-surface)" }}>
+          <button className="btn" onClick={() => window.bgStore.openMonitor()}>Cancel</button>
+          <button className="btn" disabled={!canConfirm} onClick={() => { window.bgStore.extend(capped, reason); window.pamToast(`Access extended by ${capped}h`, "info"); }} style={{ background: canConfirm ? BG : "var(--bg-surface-2)", color: canConfirm ? "#fff" : "var(--fg-4)", borderColor: "transparent" }}>
+            <Icon name="clock" size={12}/> Extend by {capped}h
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// =========================================================
+// TERMINATE OVERLAY — full-screen consequence-forward confirmation.
+// Requires typed reason. On confirm: bgStore.endSession() with the reason,
+// which stops polling, records the terminate audit entry, and hands off
+// to the post-session context form.
+// =========================================================
+const BGTerminateOverlay = () => {
+  const a = window.bgStore.active;
+  const [reason, setReason] = React.useState("");
+  const [typedId, setTypedId] = React.useState("");
+  if (!a) return null;
+  const canConfirm = reason.trim().length >= 30 && typedId.trim().toLowerCase() === (a.id || "").toLowerCase();
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 330, background: "rgba(122, 27, 18, 0.15)", display: "flex", flexDirection: "column" }}>
+      <div style={{ padding: "14px 24px", background: "#C0392B", color: "#fff", display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 18 }}>⚠</span>
+        <span style={{ font: "700 15px/1.2 var(--font-sans)" }}>Terminate emergency session — {a.id}</span>
+      </div>
+      <div className="scroll-area" style={{ flex: 1, overflow: "auto", background: "#fff" }}>
+        <div style={{ maxWidth: 560, margin: "40px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 16 }}>
+          <div>
+            <h1 style={{ font: "700 19px/1.2 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>End {a.recipient}'s access immediately?</h1>
+            <p style={{ font: "400 13.5px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "6px 0 0" }}>
+              Their session will be disconnected the moment you confirm. Any command in flight is killed. This action cannot be undone.
+            </p>
+          </div>
+
+          <div style={{ padding: 14, background: "#FCEBEB", borderLeft: "3px solid #C0392B", color: "#7A1B12", borderRadius: "0 4px 4px 0", font: "500 12.5px/1.5 var(--font-sans)" }}>
+            After termination: the recipient is prompted to file their post-session context, the credential <span className="t-mono">{a.credential}</span> is scheduled for rotation, and a mandatory post-incident review starts.
+          </div>
+
+          <Field label="Why are you terminating?" required hint="30 chars minimum — permanently recorded.">
+            <textarea className="input" rows={4} value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. Recipient ran an unexpected destructive command; ending session to prevent further damage."/>
+            <div style={{ marginTop: 4, font: "400 11px/1 var(--font-sans)", color: reason.trim().length >= 30 ? "var(--success-fg)" : "var(--fg-4)" }}>{reason.length} / 30 min</div>
+          </Field>
+
+          <Field label={`Type the session ID (${a.id}) to confirm`} required>
+            <input className="input t-mono" value={typedId} onChange={e => setTypedId(e.target.value)} placeholder={a.id}/>
+          </Field>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <button
+              className="btn"
+              disabled={!canConfirm}
+              onClick={() => { window.bgStore.endSession({ terminatedReason: reason }); window.pamToast("Session terminated · credential rotation scheduled · review required", "info"); }}
+              style={{ background: canConfirm ? "#C0392B" : "var(--bg-surface-2)", color: canConfirm ? "#fff" : "var(--fg-4)", borderColor: "transparent", padding: "12px 20px", font: "700 13.5px/1 var(--font-sans)" }}
+            >
+              Terminate session now
+            </button>
+            <button className="btn btn-ghost" onClick={() => window.bgStore.openMonitor()} style={{ alignSelf: "center", color: "var(--fg-3)" }}>
+              ← Back to monitor
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// =========================================================
+// RECIPIENT NOTIFICATION + SESSION LAUNCH
+// Screen 13a — recipient's initial notification screen after grant.
+// Simulated: admin clicks "Preview recipient view" from the monitor.
+// =========================================================
+const BGRecipientLaunch = () => {
+  const a = window.bgStore.active;
+  if (!a) return null;
+  const grantedAt = a.grantedAt || Date.now();
+  const grantedLabel = new Date(grantedAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "#0F1115", color: "#fff", display: "flex", flexDirection: "column" }}>
+      <div style={{ padding: "14px 24px", background: BG, color: "#fff", display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 18 }}>⚡</span>
+        <span style={{ font: "700 15px/1.2 var(--font-sans)" }}>Emergency access — you have been granted temporary credentials</span>
+        <span style={{ marginLeft: "auto", font: "500 11.5px/1 var(--font-sans)", opacity: 0.9 }}>Recipient view (simulated)</span>
+      </div>
+
+      <div className="scroll-area" style={{ flex: 1, overflow: "auto" }}>
+        <div style={{ maxWidth: 620, margin: "48px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 20 }}>
+          <div>
+            <h1 style={{ font: "700 22px/1.2 var(--font-sans)", color: "#fff", margin: 0 }}>{a.recipient}, you have emergency access.</h1>
+            <p style={{ font: "400 13.5px/1.6 var(--font-sans)", color: "#9CA3AF", margin: "8px 0 0" }}>
+              Granted by <strong style={{ color: "#DFE3E8" }}>{a.initiator || "Arjun Bansal"}</strong> at {grantedLabel} for <strong style={{ color: "#DFE3E8" }}>{a.durationHrs} hour{a.durationHrs === 1 ? "" : "s"}</strong>. Every command you run will be recorded.
+            </p>
+          </div>
+
+          <div style={{ padding: 18, background: "#1A1D24", border: `1px solid ${BG}`, borderRadius: 6 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "150px 1fr", rowGap: 8, columnGap: 12, font: "400 12.5px/1.5 var(--font-sans)", color: "#9CA3AF" }}>
+              <span>Resource</span><span className="t-mono" style={{ color: "#DFE3E8" }}>{a.resource}</span>
+              <span>Credential</span><span className="t-mono" style={{ color: "#DFE3E8" }}>{a.credential} <span style={{ color: "#6B7280" }}>(injected — not viewable)</span></span>
+              <span>Severity</span><span><SeverityBadge level={a.severity}/></span>
+              <span>Expires at</span><span style={{ color: "#DFE3E8" }}>{new Date(grantedAt + a.durationHrs * 3600000).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}</span>
+              <span>Incident</span><span style={{ color: "#DFE3E8" }}>{a.ticket || "—"} · {a.reason || "—"}</span>
+            </div>
+            {a.message && (
+              <div style={{ marginTop: 12, padding: 10, background: "#0F1115", borderRadius: 4, font: "400 12px/1.5 var(--font-sans)", color: "#DFE3E8" }}>
+                <div className="t-tiny" style={{ color: "#6B7280", marginBottom: 4 }}>Message from {a.initiator || "admin"}</div>
+                "{a.message}"
+              </div>
+            )}
+          </div>
+
+          <div style={{ padding: 12, background: "rgba(192, 57, 43, 0.14)", borderLeft: "3px solid #C0392B", color: "#F87171", font: "500 12.5px/1.5 var(--font-sans)" }}>
+            ⚡ Your session will be recorded (video + keystrokes). A mandatory post-session form appears when you disconnect. The credential is rotated within 24h.
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <button className="btn" onClick={() => window.bgStore.openRecipientMfa()} style={{ background: BG, color: "#fff", borderColor: "transparent", padding: "14px 20px", font: "700 14px/1 var(--font-sans)" }}>
+              <Icon name="terminal" size={13}/> Connect to {a.resource}
+            </button>
+            <button className="btn btn-ghost" onClick={() => window.bgStore.exitRecipientView()} style={{ alignSelf: "center", color: "#9CA3AF" }}>
+              ← Back to admin monitor (simulation)
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// =========================================================
+// RECIPIENT MFA-ON-CONNECT — Screen 13b
+// Recipient must re-verify their identity before the session actually opens.
+// Uses the same 6-digit auto-advance pattern as the admin trigger.
+// =========================================================
+const BGRecipientMfa = () => {
+  const a = window.bgStore.active;
+  const [code, setCode] = React.useState("");
+  const [attempts, setAttempts] = React.useState(3);
+  const [error, setError] = React.useState(null);
+  const [verifying, setVerifying] = React.useState(false);
+  const state = window.bgStore.recipientMfaState;
+  const submit = (c) => {
+    setVerifying(true);
+    setTimeout(() => {
+      setVerifying(false);
+      if (c === "000000") {
+        setAttempts(a => {
+          const left = a - 1;
+          setError(left > 0 ? `Incorrect. ${left} attempt${left === 1 ? "" : "s"} left.` : "Locked out. Contact your admin.");
+          return left;
+        });
+        setCode("");
+      } else {
+        window.bgStore.submitRecipientMfa(true);
+        window.pamToast("Recipient connected · commands are now being recorded", "info");
+      }
+    }, 700);
+  };
+  React.useEffect(() => { if (code.length === 6 && !verifying && state !== "done") submit(code); }, [code]);
+  if (!a) return null;
+
+  // Once MFA succeeds we show the "session live" splash briefly, then flow
+  // back to the admin monitor. In real product the recipient would land in
+  // their terminal/CLI here.
+  if (state === "done") {
+    return (
+      <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "#0F1115", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, padding: 24 }}>
+        <div style={{ width: 72, height: 72, borderRadius: "50%", background: "rgba(123, 62, 168, 0.2)", color: "#B78CD9", display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+          <Icon name="terminal" size={32} color="#B78CD9"/>
+        </div>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ font: "700 20px/1.2 var(--font-sans)" }}>Connected to {a.resource}</div>
+          <div style={{ font: "400 13px/1.5 var(--font-sans)", color: "#9CA3AF", margin: "8px 0 0" }}>Your session is live and recording. Run only what the incident requires.</div>
+        </div>
+        <div style={{ padding: 14, background: "#1A1D24", borderRadius: 6, font: "500 12.5px/1.4 var(--font-mono)", color: "#DFE3E8", maxWidth: 500 }}>
+          $ ssh {a.credential}@{a.resource}<br/>
+          <span style={{ color: "#B78CD9" }}>Connected. Type 'exit' to disconnect. Session recording: <b>ON</b>.</span>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+          <button className="btn" onClick={() => window.bgStore.endSession({})} style={{ background: "#C0392B", color: "#fff", borderColor: "transparent" }}>
+            Disconnect (end session)
+          </button>
+          <button className="btn" onClick={() => window.bgStore.exitRecipientView()} style={{ background: "#374151", color: "#fff", borderColor: "transparent" }}>
+            Back to admin monitor
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "#0F1115", color: "#fff", display: "flex", flexDirection: "column" }}>
+      <div style={{ padding: "14px 24px", background: BG, color: "#fff", font: "700 14px/1.2 var(--font-sans)" }}>
+        Confirm identity before connecting
+      </div>
+      <div style={{ padding: "10px 24px", background: "rgba(192, 57, 43, 0.2)", borderLeft: "3px solid #C0392B", color: "#F87171", font: "500 12.5px/1.5 var(--font-sans)" }}>
+        ⚡ MFA is required every time you connect to an emergency session. The proxy does not open the connection until this succeeds.
+      </div>
+      <div style={{ maxWidth: 440, margin: "48px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 20 }}>
+        <h1 style={{ font: "700 20px/1.2 var(--font-sans)", margin: 0 }}>Enter the 6-digit code from your authenticator app</h1>
+        <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+          {[0,1,2,3,4,5].map(i => (
+            <input
+              key={i}
+              type="text" inputMode="numeric" maxLength={1}
+              value={code[i] || ""}
+              disabled={verifying || attempts === 0}
+              onChange={e => {
+                const v = e.target.value.replace(/\D/g, "").slice(0, 1);
+                const parent = e.target.parentElement;
+                setCode(prev => (prev.slice(0, i) + v + prev.slice(i + 1)).slice(0, 6));
+                if (v && i < 5) parent.children[i + 1]?.focus();
+              }}
+              style={{
+                width: 48, height: 56, textAlign: "center",
+                font: "600 22px/1 var(--font-mono)",
+                border: `1px solid ${error ? "#F87171" : "#374151"}`,
+                borderRadius: 6, background: verifying ? "#1F2937" : "#111827",
+                color: "#fff", outline: "none",
+              }}
+            />
+          ))}
+        </div>
+        {error && <div style={{ padding: "10px 12px", background: "rgba(192,57,43,0.2)", color: "#F87171", borderRadius: 4, font: "500 12.5px/1.4 var(--font-sans)" }}>⚠ {error}</div>}
+        {verifying && !error && <div style={{ textAlign: "center", font: "500 12px/1.4 var(--font-sans)", color: "#B78CD9" }}><Spinner size={12}/> Verifying…</div>}
+        <div style={{ textAlign: "center", marginTop: 10 }}>
+          <a href="#" onClick={e => { e.preventDefault(); window.bgStore.exitRecipientView(); }} style={{ font: "500 12.5px/1 var(--font-sans)", color: "#9CA3AF" }}>
+            Cancel — do not connect
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// =========================================================
+// POST-SESSION CONTEXT FORM — Screen 13c
+// Mandatory for the recipient after every break-glass session ends. This
+// captures what the recipient actually did, in their own words, and is
+// attached to the review record so admins reviewing the session have both
+// audit-log evidence AND recipient context.
+// =========================================================
+const BGPostSessionForm = () => {
+  const rev = window.bgStore.pendingReview;
+  const [f, setF] = React.useState({ desc: "", commands: "", incidentResult: "", lessons: "" });
+  const set = (k) => (e) => setF(prev => ({ ...prev, [k]: e.target.value }));
+  if (!rev) return null;
+  const complete = f.desc.trim().length >= 50 && f.commands.trim().length >= 10 && f.incidentResult;
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "#fff", display: "flex", flexDirection: "column" }}>
+      <BGChromeHeader title={`Post-session context — ${rev.id}`}/>
+      <BGConsequenceBanner>Your session ended. This form is required — the review cannot close without your input, and access to further break-glass may be blocked until it is filed.</BGConsequenceBanner>
+      <div className="scroll-area" style={{ flex: 1, overflow: "auto" }}>
+        <div style={{ maxWidth: 640, margin: "24px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 18 }}>
+          <div>
+            <h1 style={{ font: "700 20px/1.2 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Tell us what you did.</h1>
+            <p style={{ font: "400 13px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "6px 0 0" }}>
+              Your context sits next to the recorded evidence when {rev.initiator || "the admin"} reviews this session.
+            </p>
+          </div>
+
+          <div style={{ padding: 12, background: "var(--bg-surface-2)", borderRadius: 6, font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>
+            Recorded automatically: <strong style={{ color: "var(--fg-1)" }}>{rev.commands} command{rev.commands === 1 ? "" : "s"}</strong> · session duration {rev.duration || "—"} · risk score {rev.riskScore || 0}
+          </div>
+
+          <Field label="What did you do during the session?" required hint="50 chars min. Be specific — the review references this.">
+            <textarea className="input" rows={4} value={f.desc} onChange={set("desc")} placeholder="e.g. Investigated replica lag, forced a stepDown on the primary, monitored oplog catch-up, then disconnected once writes resumed."/>
+            <div style={{ marginTop: 4, font: "400 11px/1 var(--font-sans)", color: f.desc.length >= 50 ? "var(--success-fg)" : "var(--fg-4)" }}>{f.desc.length} / 50 min</div>
+          </Field>
+
+          <Field label="Which commands mattered most?" required hint="Paste the key commands — full log is recorded separately.">
+            <textarea className="input t-mono" rows={4} value={f.commands} onChange={set("commands")} placeholder="rs.stepDown(60)&#10;db.oplog.rs.find().sort({$natural:-1}).limit(5)"/>
+          </Field>
+
+          <Field label="Did the emergency resolve?" required>
+            <div style={{ display: "flex", gap: 8 }}>
+              {[
+                { v: "resolved",     label: "✓ Resolved",      color: "var(--success-fg)" },
+                { v: "partial",      label: "◐ Partially",     color: "var(--warning-fg)" },
+                { v: "unresolved",   label: "✗ Still open",    color: "var(--danger-fg)" },
+                { v: "escalated",    label: "↑ Escalated",     color: "#7B3EA8" },
+              ].map(o => (
+                <button key={o.v} onClick={() => setF(prev => ({ ...prev, incidentResult: o.v }))} style={{ flex: 1, padding: "10px 12px", border: `1.5px solid ${f.incidentResult === o.v ? o.color : "var(--border)"}`, background: f.incidentResult === o.v ? `color-mix(in oklch, ${o.color} 10%, transparent)` : "#fff", color: f.incidentResult === o.v ? o.color : "var(--fg-2)", font: `${f.incidentResult === o.v ? 700 : 500} 12.5px/1 var(--font-sans)`, borderRadius: 6, cursor: "pointer" }}>
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </Field>
+
+          <Field label="Anything the team should learn from this? (optional)">
+            <textarea className="input" rows={3} value={f.lessons} onChange={set("lessons")} placeholder="e.g. Our replica-lag alert fires too late — we should tighten the threshold from 60s to 30s."/>
+          </Field>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: 4 }}>
+            <button className="btn" disabled={!complete} onClick={() => { window.bgStore.savePostSession(f); window.pamToast("Post-session context filed · review is now unblocked", "info"); }} style={{ background: complete ? BG : "var(--bg-surface-2)", color: complete ? "#fff" : "var(--fg-4)", borderColor: "transparent", padding: "12px 20px", font: "700 13.5px/1 var(--font-sans)" }}>
+              File post-session context
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 // =========================================================
 // POST-INCIDENT REVIEW MODAL
@@ -948,6 +1505,18 @@ const BGReviewModal = () => {
             <button className="btn btn-sm" onClick={() => window.pamToast("Opening session recording…", "info")}><Icon name="video" size={11}/> View recording</button>
             <button className="btn btn-sm" onClick={() => window.pamToast("Opening keystroke log…", "info")}><Icon name="terminal" size={11}/> Keystroke log</button>
           </div>
+
+          {r.postSession && (
+            <div>
+              <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7, marginBottom: 6 }}>Recipient post-session context</div>
+              <div style={{ padding: 12, background: bgSoft, borderRadius: 8, borderLeft: `3px solid ${BG}`, font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-2)", display: "flex", flexDirection: "column", gap: 8 }}>
+                <div><span style={{ color: "var(--fg-4)", marginRight: 6 }}>What was done:</span>{r.postSession.desc}</div>
+                {r.postSession.commands && <div><span style={{ color: "var(--fg-4)", marginRight: 6 }}>Key commands:</span><span className="t-mono">{r.postSession.commands}</span></div>}
+                <div><span style={{ color: "var(--fg-4)", marginRight: 6 }}>Outcome:</span><strong style={{ color: "var(--fg-1)", textTransform: "capitalize" }}>{r.postSession.incidentResult}</strong></div>
+                {r.postSession.lessons && <div><span style={{ color: "var(--fg-4)", marginRight: 6 }}>Lessons:</span>{r.postSession.lessons}</div>}
+              </div>
+            </div>
+          )}
 
           {!done ? (
             <>
@@ -1039,11 +1608,16 @@ const BreakGlassController = () => {
   return (
     <>
       {store.open === "trigger" && <BGTriggerModal/>}
-      {store.open === "monitor" && store.active && <BGMonitorPanel/>}
+      {store.open === "monitor"           && store.active && <BGMonitorPanel/>}
+      {store.open === "extend"            && store.active && <><BGMonitorPanel/><BGExtendModal/></>}
+      {store.open === "terminate"         && store.active && <BGTerminateOverlay/>}
+      {store.open === "recipient-launch"  && store.active && <BGRecipientLaunch/>}
+      {store.open === "recipient-mfa"     && store.active && <BGRecipientMfa/>}
+      {store.open === "post-session"      && store.pendingReview && <BGPostSessionForm/>}
       {store.reviewOpen && <BGReviewModal/>}
-      {store.active && <BGFloatingIndicator/>}
+      {store.active && store.open !== "monitor" && store.open !== "extend" && store.open !== "terminate" && store.open !== "recipient-launch" && store.open !== "recipient-mfa" && <BGFloatingIndicator/>}
     </>
   );
 };
 
-Object.assign(window, { BG_COLOR: BG, BGBadge, SeverityBadge, BGReviewStatus, BGTriggerModal, BGMonitorPanel, BGReviewModal, BreakGlassReviewList, BreakGlassController, BGFloatingIndicator });
+Object.assign(window, { BG_COLOR: BG, BGBadge, SeverityBadge, BGReviewStatus, BGTriggerModal, BGMonitorPanel, BGExtendModal, BGTerminateOverlay, BGRecipientLaunch, BGRecipientMfa, BGPostSessionForm, BGReviewModal, BreakGlassReviewList, BreakGlassController, BGFloatingIndicator });
