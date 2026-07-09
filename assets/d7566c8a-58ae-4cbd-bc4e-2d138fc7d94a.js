@@ -837,6 +837,32 @@ const NewStep2ReviewConfig = ({ data, setData }) => {
     </button>
   );
 
+  // Fix 3 — conditional Local Accounts group. Only rendered for Types where
+  // OS-level local accounts are a meaningful concept — Server resources
+  // primarily. Hidden for Web app, Cloud, and (default) Database — for DBs
+  // the ephemeral-OS-account pattern doesn't map cleanly to DB-level service
+  // accounts, so defaulting to hide is the safer call.
+  //
+  // Backend dependency: engineering confirms the exact Type list this
+  // applies to. Once confirmed, update the whitelist below or move the
+  // decision into an authoritative TYPE_META lookup.
+  const supportsLocalAccounts = data.type === "server";
+
+  // Fix 2 — auto-extend pattern. When standing-local-accounts override is
+  // ON, the root-credential's rotation policy also governs those standing
+  // accounts (they don't need an independently configurable cadence in this
+  // MVP). Rotation card surfaces this so the admin sees the dependency
+  // instead of guessing whether rotation still applies.
+  //
+  // Flag as an eng dependency: if local accounts need their own rotation
+  // cadence, flip this to the separate-policy pattern (nested picker under
+  // the Ephemeral card scoped to standing accounts only).
+  const standingOverride = supportsLocalAccounts && data.localAccountMode === "standing";
+
+  const GroupLabel = ({ children }) => (
+    <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7, padding: "8px 4px 6px" }}>{children}</div>
+  );
+
   return (
     <div style={{ padding: "22px 24px", maxWidth: 760, margin: "0 auto", display: "flex", flexDirection: "column", gap: 14 }}>
       <div>
@@ -846,50 +872,75 @@ const NewStep2ReviewConfig = ({ data, setData }) => {
         </div>
       </div>
 
-      <ConfigCard
-        id="rotation" icon="rotate-cw"
-        title={`${currentRotation.name} — ${currentRotation.detail}`}
-        subtitle={rotationReason(data.env, data.criticality, data.rotationPolicyId)}
-      >
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {ADD_ROTATION_POLICIES.map(p => (
-            <RadioRow key={p.id} selected={p.id === data.rotationPolicyId}
-              primary={`${p.name} · ${p.detail}`} secondary={p.scopeSummary}
-              onClick={() => { patch("rotationPolicyId", p.id); setExpanded(null); }}/>
-          ))}
-        </div>
-      </ConfigCard>
+      {/* Fix 1 — Root credential group. Rotation + Reconciliation both govern
+          the standing root credential entered in Step 1; they belong together.
+          Always rendered regardless of resource Type — every resource has a
+          root credential that needs rotation + reconciliation logic. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <GroupLabel>Root credential</GroupLabel>
 
-      <ConfigCard
-        id="local" icon="user-plus"
-        title={data.localAccountMode === "ephemeral"
-          ? "Local accounts will be created just-in-time and destroyed after each session (ephemeral)."
-          : "Standing local accounts — created once and reused across sessions."}
-        subtitle={data.localAccountMode === "ephemeral"
-          ? "Ephemeral is the recommended default — reduces lateral-movement blast radius."
-          : "Standing accounts persist between sessions. Use only when a target requires it."}
-      >
-        <Toggle
-          value={data.localAccountMode === "standing"}
-          onChange={v => patch("localAccountMode", v ? "standing" : "ephemeral")}
-          label="Allow standing local accounts instead"
-          hint="Opt out of ephemeral mode. Standing accounts persist after the session ends — required only for a small set of targets that reject just-in-time provisioning."
-        />
-      </ConfigCard>
+        <ConfigCard
+          id="rotation" icon="rotate-cw"
+          title={`${currentRotation.name} — ${currentRotation.detail}`}
+          subtitle={rotationReason(data.env, data.criticality, data.rotationPolicyId)}
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {ADD_ROTATION_POLICIES.map(p => (
+              <RadioRow key={p.id} selected={p.id === data.rotationPolicyId}
+                primary={`${p.name} · ${p.detail}`} secondary={p.scopeSummary}
+                onClick={() => { patch("rotationPolicyId", p.id); setExpanded(null); }}/>
+            ))}
+          </div>
+        </ConfigCard>
 
-      <ConfigCard
-        id="recon" icon="shield"
-        title={`${currentRecon.name} will handle password rotation for this resource.`}
-        subtitle={`This reconciliation account already ${currentRecon.scope}.`}
-      >
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {RECON_ACCOUNTS.map(a => (
-            <RadioRow key={a.id} selected={a.id === data.reconciliationAccountId}
-              primary={a.name} secondary={a.scope}
-              onClick={() => { patch("reconciliationAccountId", a.id); setExpanded(null); }}/>
-          ))}
+        {/* Fix 2 — auto-extend note. Only appears when the standing-local-
+            accounts override is on. Explicit, on-screen resolution of what
+            was previously an unstated dependency. */}
+        {standingOverride && (
+          <div style={{ margin: "-4px 0 0 40px", padding: "8px 10px", background: "var(--brand-soft)", borderLeft: "3px solid var(--brand)", borderRadius: 4, font: "400 12px/1.5 var(--font-sans)", color: "var(--brand-fg)" }}>
+            <strong>{currentRotation.name}</strong> will also apply to standing local accounts under this resource — they rotate on the same cadence as the root credential.
+          </div>
+        )}
+
+        <ConfigCard
+          id="recon" icon="shield"
+          title={`${currentRecon.name} will handle password rotation for this resource.`}
+          subtitle={`This reconciliation account already ${currentRecon.scope}.`}
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {RECON_ACCOUNTS.map(a => (
+              <RadioRow key={a.id} selected={a.id === data.reconciliationAccountId}
+                primary={a.name} secondary={a.scope}
+                onClick={() => { patch("reconciliationAccountId", a.id); setExpanded(null); }}/>
+            ))}
+          </div>
+        </ConfigCard>
+      </div>
+
+      {/* Fix 3 — Local accounts group. Rendered only for Types where OS-level
+          local accounts are how access is mediated. See supportsLocalAccounts
+          note above for the eng confirmation TODO. */}
+      {supportsLocalAccounts && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
+          <GroupLabel>Local accounts</GroupLabel>
+          <ConfigCard
+            id="local" icon="user-plus"
+            title={data.localAccountMode === "ephemeral"
+              ? "Local accounts will be created just-in-time and destroyed after each session (ephemeral)."
+              : "Standing local accounts — created once and reused across sessions."}
+            subtitle={data.localAccountMode === "ephemeral"
+              ? "Ephemeral is the recommended default — reduces lateral-movement blast radius."
+              : "Standing accounts persist between sessions. Use only when a target requires it."}
+          >
+            <Toggle
+              value={data.localAccountMode === "standing"}
+              onChange={v => patch("localAccountMode", v ? "standing" : "ephemeral")}
+              label="Allow standing local accounts instead"
+              hint="Opt out of ephemeral mode. Standing accounts persist after the session ends — required only for a small set of targets that reject just-in-time provisioning. When on, the root credential's rotation policy also covers these accounts."
+            />
+          </ConfigCard>
         </div>
-      </ConfigCard>
+      )}
     </div>
   );
 };
