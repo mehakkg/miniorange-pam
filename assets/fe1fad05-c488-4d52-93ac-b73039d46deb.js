@@ -131,6 +131,9 @@ const OperationalView = () => (
 const AlertsCard = () => (
   <div className="card">
     <div className="card-header"><span className="h-card">Recent alerts</span></div>
+    <div style={{ padding: "10px 20px 0" }}>
+      {window.ZTNADashboardSignals && React.createElement(window.ZTNADashboardSignals)}
+    </div>
     <div>
       {[
         { kind: "danger",  icon: "alert-triangle", title: "Rotation failed: ledger-mongo-cluster", time: "2h ago", detail: "Bind credentials rejected on retry. Likely cause: account locked." },

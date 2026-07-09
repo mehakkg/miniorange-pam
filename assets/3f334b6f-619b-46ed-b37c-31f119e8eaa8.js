@@ -299,7 +299,11 @@ const AllResourcesTable = ({ rows, allCount, selected, toggle, toggleAll, allChe
             {showCol("type")    && <td><span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "var(--fg-2)" }}><Icon name={TYPE_META[r.type]?.icon || "server"} size={13} color="var(--fg-3)"/>{TYPE_META[r.type]?.label || r.type}</span></td>}
             {showCol("host")    && <td className="t-mono" style={{ fontSize: 12, color: "var(--fg-2)" }}>{r.host}</td>}
             {showCol("port")    && <td className="t-mono" style={{ fontSize: 12, color: "var(--fg-3)" }}>{r.port}</td>}
-            {showCol("conn")    && <td><ConnStatus s={r.conn}/></td>}
+            {showCol("conn")    && <td>{
+              window.ZTNAListBadge && window.ztnaStore && window.ztnaStore.resourceAssignments.some(a => a.resource === r.name && !window.ztnaStore.resourceReachable(a.siteId))
+                ? <ZTNAListBadge resourceName={r.name}/>
+                : <ConnStatus s={r.conn}/>
+            }</td>}
             {showCol("crit")    && <td><span className="badge" style={{ background: CRIT_STYLE[r.criticality].bg, color: CRIT_STYLE[r.criticality].fg, borderColor: "transparent", textTransform: "capitalize" }}>{r.criticality}</span></td>}
             {showCol("env")     && <td><span className="badge" style={{ textTransform: "capitalize" }}>{r.env}</span></td>}
             {showCol("creds")   && <td style={{ color: "var(--fg-2)" }}>{r.credCount === 0 ? <span style={{ color: "var(--fg-4)" }}>—</span> : `${r.credCount} cred${r.credCount===1?"":"s"}`}</td>}

@@ -147,7 +147,9 @@ const ResourceOverviewTab = ({ r, editing }) => {
   );
 
   return (
-  <div style={{ padding: 24, display: "grid", gridTemplateColumns: "minmax(0, 1fr) 360px", gap: 16 }}>
+  <div style={{ padding: 24 }}>
+    {window.ZTNAResourceBanner && <ZTNAResourceBanner resourceName={r.name}/>}
+  <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 360px", gap: 16 }}>
     <div className="card">
       <div className="card-header"><span className="h-card">Resource details</span></div>
       <div style={{ padding: "8px 20px 20px" }}>
@@ -185,6 +187,7 @@ const ResourceOverviewTab = ({ r, editing }) => {
           <KV label="Recording" value={<span style={{ color: "var(--success-fg)" }}>Enabled</span>}/>
           <KV label="MFA enforcement" value={<span style={{ color: "var(--success-fg)" }}>Required</span>}/>
           <KV label="Criticality" value={<span style={{ textTransform: "capitalize", color: CRIT_STYLE[r.criticality].fg }}>{r.criticality}</span>}/>
+          {window.ZTNARoutingRow && <ZTNARoutingRow resourceName={r.name}/>}
         </div>
       </div>
       <div className="card">
@@ -197,6 +200,7 @@ const ResourceOverviewTab = ({ r, editing }) => {
         </div>
       </div>
     </div>
+  </div>
   </div>
   );
 };

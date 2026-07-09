@@ -58,9 +58,10 @@ const ZTNA_CERT_EXPIRING_DAYS  = 30;
     // Panel state — the ZTNA surface uses several slide-in and full-page
     // routes. Panel type + payload is centralized here so any component can
     // command navigation.
-    open: null,          // 'concept' | 'site-detail' | 'setup-flow' | 'cert-renew'
+    open: null,          // 'concept' | 'site-detail' | 'setup-flow' | 'cert-renew' | 'troubleshoot'
     detailSiteId: null,
     renewConnectorId: null,
+    troubleConnectorId: null,
 
     // Setup flow state (Surface D). Populated when open === "setup-flow".
     setup: null,         // { entry: "new-site" | "existing-site", step, siteId, siteDraft, connectorDraft, token, status }
@@ -73,6 +74,16 @@ const ZTNA_CERT_EXPIRING_DAYS  = 30;
     openConcept:      () => { store.open = "concept";      store.emit(); },
     openSiteDetail:   (id) => { store.detailSiteId = id; store.open = "site-detail"; store.emit(); },
     openRenew:        (connId) => { store.renewConnectorId = connId; store.open = "cert-renew"; store.emit(); },
+    openTroubleshoot: (connId) => { store.troubleConnectorId = connId; store.open = "troubleshoot"; store.emit(); },
+    // Demo helper — flips an offline connector back online, as if the admin
+    // restarted the process and its heartbeat resumed. The troubleshoot
+    // panel's live-status poll picks this up on its next tick.
+    simulateReconnect: (connId) => {
+      store.connectors = store.connectors.map(c => c.id === connId ? { ...c, lastHeartbeatMs: now, latencyMs: 51 } : c);
+      const c = store.connectors.find(cc => cc.id === connId);
+      if (c) store.events = [{ ts: now, siteId: c.siteId, connectorId: connId, kind: "heartbeat", message: "Connector reconnected — heartbeat resumed" }, ...store.events];
+      store.emit();
+    },
     // Setup flow entry points:
     //   openSetupNewSite()          — full 4-step flow, starting at Create site
     //   openSetupExistingSite(id)   — 3-step flow (Configure → Deploy → Confirm) for an already-created site
@@ -180,6 +191,7 @@ const ZTNA_CERT_EXPIRING_DAYS  = 30;
     close: () => {
       if (store._setupTimer) { clearTimeout(store._setupTimer); store._setupTimer = null; }
       store.open = null; store.detailSiteId = null; store.renewConnectorId = null;
+      store.troubleConnectorId = null;
       store.renewStatus = null; store.renewMonths = null;
       // Leave setup state intact if the flow is in "waiting" state — user
       // chose deploy-later. Otherwise clear it so a fresh flow starts clean.
@@ -467,7 +479,7 @@ const ZTNAConnectorRow = ({ c, compact }) => {
         </div>
       </div>
       {status === "offline" && (
-        <button className="btn btn-sm" onClick={() => window.pamToast && window.pamToast("Troubleshoot panel arrives in Phase 3", "info")} style={{ color: "var(--danger-fg)", borderColor: "var(--danger-fg)" }}>
+        <button className="btn btn-sm" onClick={() => window.ztnaStore.openTroubleshoot(c.id)} style={{ color: "var(--danger-fg)", borderColor: "var(--danger-fg)" }}>
           Troubleshoot →
         </button>
       )}
@@ -731,6 +743,7 @@ const ZTNAController = () => {
       {store.open === "site-detail" && <ZTNASiteDetailPanel/>}
       {store.open === "setup-flow"  && <ZTNASetupFlow/>}
       {store.open === "cert-renew"  && <ZTNACertRenewPanel/>}
+      {store.open === "troubleshoot" && <ZTNATroubleshootPanel/>}
     </>
   );
 };
@@ -1246,7 +1259,7 @@ const ZTNASiteHealthCard = ({ siteId }) => {
       {status === "partial" && (
         <div style={{ marginTop: 10, padding: 10, background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 4, font: "500 12px/1.5 var(--font-sans)" }}>
           ⚠ {offline} of {conns.length} connectors are offline. Resource may be unreachable if online connector fails.
-          <div style={{ marginTop: 4 }}><a href="#" onClick={e => { e.preventDefault(); window.pamToast && window.pamToast("Troubleshoot arrives in Phase 3", "info"); }} style={{ color: "var(--warning-fg)", textDecoration: "underline", fontWeight: 600 }}>Fix →</a></div>
+          <div style={{ marginTop: 4 }}><a href="#" onClick={e => { e.preventDefault(); const oc = conns.find(c => store.connectorStatus(c) === "offline"); if (oc) window.ztnaStore.openTroubleshoot(oc.id); }} style={{ color: "var(--warning-fg)", textDecoration: "underline", fontWeight: 600 }}>Fix →</a></div>
         </div>
       )}
       {status === "offline" && (
@@ -1317,9 +1330,274 @@ const ZTNANetworkRoutingSection = ({ ipHint, value, onChange }) => {
   );
 };
 
+// =========================================================
+// TROUBLESHOOT PANEL (Surface G · connector offline)
+// Three sequential diagnostic cards + live status that polls every 10s.
+// Each step has the exact command to run and the output to expect —
+// the admin never has to leave PAM to know what "healthy" looks like.
+// =========================================================
+const ZTNATroubleshootPanel = () => {
+  const store = window.useZtna();
+  const c = store.connectors.find(cc => cc.id === store.troubleConnectorId);
+  const [checked, setChecked] = React.useState({});
+  const [pollTick, setPollTick] = React.useState(0);
+  const [escalOpen, setEscalOpen] = React.useState(false);
+  // Live status poll — every 10 seconds re-read connector status. The store
+  // emit on simulateReconnect() also re-renders immediately, so the poll is
+  // mostly belt-and-braces (and matches the spec's 10s cadence).
+  React.useEffect(() => {
+    const t = setInterval(() => setPollTick(x => x + 1), 10000);
+    return () => clearInterval(t);
+  }, []);
+  if (!c) return null;
+  const site = store.sites.find(s => s.id === c.siteId);
+  const status = store.connectorStatus(c);
+  const online = status === "online";
+
+  const steps = [
+    {
+      id: "vm", title: "Is the VM running?",
+      body: "SSH into your connector host and check if the connector process is running.",
+      cmd: "systemctl status pam-connector",
+      expect: 'Active: active (running)',
+    },
+    {
+      id: "reach", title: "Can the VM reach PAM?",
+      body: "The connector needs outbound HTTPS to PAM. Verify from the host:",
+      cmd: "curl -v https://pam.northwind.com/healthz",
+      expect: "HTTP 200",
+    },
+    {
+      id: "restart", title: "Restart the connector",
+      body: "After restarting, watch for this status in PAM — it should turn green within 60 seconds.",
+      cmd: "systemctl restart pam-connector",
+      expect: null,
+    },
+  ];
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 200, background: "rgba(0,0,0,0.35)", display: "flex", justifyContent: "flex-end" }} onClick={() => window.ztnaStore.close()}>
+      <aside onClick={e => e.stopPropagation()} style={{ width: 480, maxWidth: "100vw", background: "#fff", height: "100%", display: "flex", flexDirection: "column", boxShadow: "-24px 0 60px rgba(0,0,0,0.14)" }}>
+        <div style={{ padding: "16px 22px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ font: "700 15px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>Connector offline — {c.name}</div>
+            <div className="t-tiny" style={{ color: "var(--fg-3)", marginTop: 2 }}>{site?.name}</div>
+          </div>
+          <button className="btn btn-ghost btn-icon" onClick={() => window.ztnaStore.close()} aria-label="Close"><Icon name="x" size={14}/></button>
+        </div>
+
+        <div className="scroll-area" style={{ flex: 1, overflow: "auto", padding: 22, display: "flex", flexDirection: "column", gap: 14 }}>
+          {!online && (
+            <div style={{ padding: 12, background: "var(--danger-soft)", color: "var(--danger-fg)", borderRadius: 6, font: "500 12.5px/1.5 var(--font-sans)" }}>
+              Last heartbeat: {store.fmtHeartbeat(c)} (expected every {c.heartbeatIntervalSec} seconds)
+            </div>
+          )}
+
+          {/* Diagnostic steps */}
+          {!online && steps.map((s, i) => (
+            <div key={s.id} className="card" style={{ padding: 14, opacity: checked[s.id] ? 0.75 : 1 }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                <div style={{ width: 22, height: 22, borderRadius: "50%", background: checked[s.id] ? "var(--success-fg)" : "var(--bg-surface-2)", color: checked[s.id] ? "#fff" : "var(--fg-3)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", font: "700 11px/1 var(--font-sans)" }}>
+                  {checked[s.id] ? "✓" : i + 1}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ font: "600 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{s.title}</div>
+                  <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 3 }}>{s.body}</div>
+                  <pre style={{ margin: "8px 0 0", padding: 10, background: "#0F1115", color: "#DFE3E8", font: "500 11.5px/1.5 var(--font-mono)", borderRadius: 4, overflow: "auto", whiteSpace: "pre-wrap" }}>{s.cmd}</pre>
+                  {s.expect && (
+                    <div style={{ marginTop: 6, font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>
+                      Expected: <span className="t-mono" style={{ color: "var(--success-fg)" }}>{s.expect}</span>
+                    </div>
+                  )}
+                  <label style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: 8, cursor: "pointer", font: "500 12px/1 var(--font-sans)", color: "var(--fg-2)" }}>
+                    <input type="checkbox" checked={!!checked[s.id]} onChange={() => setChecked(p => ({ ...p, [s.id]: !p[s.id] }))} style={{ accentColor: "var(--brand-fg)" }}/>
+                    Mark as checked
+                  </label>
+                </div>
+              </div>
+            </div>
+          ))}
+
+          {/* Live status */}
+          <div style={{ padding: 14, border: `1px solid ${online ? "var(--success-fg)" : "var(--border)"}`, borderRadius: 8, background: online ? "var(--success-soft)" : "var(--bg-surface)" }}>
+            {online ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--success-fg)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>✓</div>
+                <div style={{ font: "600 13px/1.3 var(--font-sans)", color: "var(--success-fg)" }}>Online — {c.name} reconnected</div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Spinner size={13}/>
+                <div style={{ flex: 1 }}>
+                  <div style={{ font: "600 12.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>Connector status: ✗ Offline</div>
+                  <div className="t-tiny" style={{ color: "var(--fg-4)", marginTop: 2 }}>Still waiting for heartbeat… checking every 10 seconds</div>
+                </div>
+                <button className="btn btn-sm" onClick={() => window.ztnaStore.simulateReconnect(c.id)} style={{ fontSize: 11 }}>[Demo] Simulate reconnect</button>
+              </div>
+            )}
+          </div>
+
+          {/* Escalation */}
+          {!online && (
+            <div>
+              <button className="btn btn-ghost btn-sm" onClick={() => setEscalOpen(!escalOpen)} style={{ color: "var(--fg-3)" }}>
+                Something else wrong? {escalOpen ? "↑" : "↓"}
+              </button>
+              {escalOpen && (
+                <div style={{ marginTop: 8, padding: 12, background: "var(--bg-surface-2)", borderRadius: 6, font: "400 12px/1.6 var(--font-sans)", color: "var(--fg-2)" }}>
+                  <div>· Check connector logs: <span className="t-mono">journalctl -u pam-connector -n 100</span></div>
+                  <div>· Verify the enrollment certificate has not been revoked (Connectors → {c.name} → certificate).</div>
+                  <div>· If the host was re-imaged, re-enroll with a fresh token — the old identity will not reconnect.</div>
+                  <div style={{ marginTop: 8 }}>
+                    <a href="#" onClick={e => e.preventDefault()} style={{ color: "var(--brand-fg)", textDecoration: "underline", fontWeight: 500 }}>Open connector documentation →</a>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {online && (
+          <div style={{ padding: "12px 22px", borderTop: "1px solid var(--border)", background: "var(--bg-surface)", textAlign: "right" }}>
+            <button className="btn btn-primary" onClick={() => window.ztnaStore.close()}>Close</button>
+          </div>
+        )}
+      </aside>
+    </div>
+  );
+};
+
+// =========================================================
+// ZTNA ROUTING ROW (Surface F) — dropped into the resource detail
+// Security Posture card. Reads the resource's site assignment from the
+// store; renders nothing for resources that route direct.
+// States: reachable · degraded · unreachable · not configured
+// =========================================================
+const ZTNARoutingRow = ({ resourceName }) => {
+  const store = window.useZtna();
+  const assignment = store.resourceAssignments.find(a => a.resource === resourceName);
+  if (!assignment) return null;
+  const site = store.sites.find(s => s.id === assignment.siteId);
+  if (!site) return null;
+  const siteStatus = store.siteStatus(site.id);
+  const view = siteStatus === "online" ? { status: "online",        label: "Reachable" }
+             : siteStatus === "not-enrolled" ? { status: "not-enrolled", label: "Not configured" }
+             : siteStatus === "offline" ? { status: "offline",      label: "Unreachable" }
+             : { status: "degraded", label: "Degraded" };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 0", font: "400 12.5px/1.4 var(--font-sans)" }}>
+      <span style={{ color: "var(--fg-4)", width: 110, flex: "none" }}>ZTNA Routing</span>
+      <ZTNADot status={view.status}/>
+      <span className="t-mono" style={{ color: "var(--fg-1)", fontWeight: 500 }}>{site.name}</span>
+      <span style={{ color: ZTNA_STATUS[view.status].fg, fontWeight: 500 }}>— {view.label}</span>
+      <div style={{ flex: 1 }}/>
+      <a href="#" onClick={e => { e.preventDefault(); window.ztnaStore.openSiteDetail(site.id); }} style={{ font: "500 11.5px/1 var(--font-sans)", color: "var(--brand-fg)" }}>View connectors →</a>
+    </div>
+  );
+};
+
+// =========================================================
+// RESOURCE UNREACHABLE BANNER (Surface F) — shown at the top of the
+// resource detail page when the assigned site can't reach the resource.
+// Distinct copy per failure mode (offline vs not-enrolled), per spec.
+// =========================================================
+const ZTNAResourceBanner = ({ resourceName }) => {
+  const store = window.useZtna();
+  const assignment = store.resourceAssignments.find(a => a.resource === resourceName);
+  if (!assignment) return null;
+  const site = store.sites.find(s => s.id === assignment.siteId);
+  if (!site) return null;
+  const siteStatus = store.siteStatus(site.id);
+  if (siteStatus === "online" || siteStatus === "degraded") return null;
+
+  if (siteStatus === "not-enrolled") {
+    return (
+      <div style={{ margin: "0 0 14px", padding: 12, background: "var(--bg-surface-2)", borderLeft: "3px solid var(--fg-4)", borderRadius: "0 6px 6px 0", display: "flex", alignItems: "center", gap: 10, font: "500 12.5px/1.5 var(--font-sans)", color: "var(--fg-2)" }}>
+        <span style={{ color: "var(--fg-4)" }}>○</span>
+        <span style={{ flex: 1 }}>
+          ZTNA connector not configured — <strong>{site.name}</strong> has no active connectors. This resource will be unreachable until a connector is deployed.
+        </span>
+        <button className="btn btn-sm btn-primary" onClick={() => window.ztnaStore.openSetupExistingSite(site.id)}>Deploy a connector →</button>
+      </div>
+    );
+  }
+
+  // partial-with-no-online or full offline → unreachable
+  const anyOnline = store.siteConnectors(site.id).some(c => store.connectorStatus(c) === "online");
+  if (anyOnline) return null;
+  const offlineConn = store.siteConnectors(site.id).find(c => store.connectorStatus(c) === "offline");
+  return (
+    <div style={{ margin: "0 0 14px", padding: 12, background: "var(--danger-soft)", borderLeft: "3px solid var(--danger-fg)", borderRadius: "0 6px 6px 0", display: "flex", alignItems: "center", gap: 10, font: "500 12.5px/1.5 var(--font-sans)", color: "var(--danger-fg)" }}>
+      <Icon name="alert-triangle" size={14} color="var(--danger-fg)"/>
+      <span style={{ flex: 1 }}>
+        <strong>This resource is unreachable</strong> — connector offline in {site.name}. Active sessions may have dropped. New sessions cannot be established.
+      </span>
+      {offlineConn && <button className="btn btn-sm" onClick={() => window.ztnaStore.openTroubleshoot(offlineConn.id)} style={{ color: "var(--danger-fg)", borderColor: "var(--danger-fg)" }}>Fix connector issue →</button>}
+    </div>
+  );
+};
+
+// =========================================================
+// RESOURCES-LIST CONNECTION BADGE (Surface F) — compact variant for
+// the Resources table Connection column. Returns null for non-ZTNA
+// resources so the existing cell content stands.
+// =========================================================
+const ZTNAListBadge = ({ resourceName }) => {
+  const store = window.useZtna();
+  const assignment = store.resourceAssignments.find(a => a.resource === resourceName);
+  if (!assignment) return null;
+  const reachable = store.resourceReachable(assignment.siteId);
+  if (reachable) return null;   // healthy ZTNA routing needs no callout in the list
+  return (
+    <span style={{ display: "inline-flex", flexDirection: "column", gap: 1 }}>
+      <span style={{ font: "600 11px/1.3 var(--font-sans)", color: "var(--danger-fg)" }}>✗ Unreachable</span>
+      <span style={{ font: "500 9.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.5 }}>ZTNA</span>
+    </span>
+  );
+};
+
+// =========================================================
+// DASHBOARD SIGNALS (Surface F) — compact alert lines for the admin
+// dashboard's Operational tab. Renders nothing when everything is healthy.
+// =========================================================
+const ZTNADashboardSignals = () => {
+  const store = window.useZtna();
+  const signals = [];
+  store.sites.forEach(site => {
+    const conns = store.siteConnectors(site.id);
+    const anyOnline = conns.some(c => store.connectorStatus(c) === "online");
+    const offline = conns.filter(c => store.connectorStatus(c) === "offline");
+    const affected = store.siteResources(site.id).length;
+    if (!anyOnline && offline.length > 0 && affected > 0) {
+      signals.push({ kind: "danger", text: `${affected} resource${affected === 1 ? "" : "s"} unreachable — ${offline[0].name} offline`, action: () => window.ztnaStore.openTroubleshoot(offline[0].id), actionLabel: "Troubleshoot →" });
+    }
+  });
+  const expiring = store.connectors.filter(c => store.certExpiringSoon(c));
+  if (expiring.length > 0) {
+    signals.push({ kind: "warning", text: `${expiring.length} connector certificate${expiring.length === 1 ? "" : "s"} expire${expiring.length === 1 ? "s" : ""} in ${store.certDaysLeft(expiring[0])} days`, action: () => window.ztnaStore.openRenew(expiring[0].id), actionLabel: "Renew →" });
+  }
+  if (signals.length === 0) return null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+      {signals.map((s, i) => (
+        <div key={i} style={{ padding: "9px 12px", background: s.kind === "danger" ? "var(--danger-soft)" : "var(--warning-soft)", color: s.kind === "danger" ? "var(--danger-fg)" : "var(--warning-fg)", borderRadius: 6, display: "flex", alignItems: "center", gap: 8, font: "500 12px/1.4 var(--font-sans)" }}>
+        <Icon name={s.kind === "danger" ? "alert-triangle" : "alert-circle"} size={13} color={s.kind === "danger" ? "var(--danger-fg)" : "var(--warning-fg)"}/>
+          <span style={{ flex: 1 }}>{s.text}</span>
+          <button className="btn btn-sm" onClick={s.action} style={{ fontSize: 11 }}>{s.actionLabel}</button>
+        </div>
+      ))}
+    </div>
+  );
+};
+
 Object.assign(window, {
   ZTNAConnectorsPage,
   ZTNAController,
+  ZTNATroubleshootPanel,
+  ZTNARoutingRow,
+  ZTNAResourceBanner,
+  ZTNAListBadge,
+  ZTNADashboardSignals,
   ZTNAConceptPanel,
   ZTNASiteDetailPanel,
   ZTNASiteCard,

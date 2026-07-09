@@ -94,9 +94,13 @@ const ResourcesScreen = ({ empty, onOpen }) => {
                   <td style={{ color: "var(--fg-2)" }}>{r.credCount}</td>
                   <td>{r.sessions > 0 ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><span className="dot dot-success pulse-dot"/>{r.sessions}</span> : <span style={{ color: "var(--fg-4)" }}>—</span>}</td>
                   <td>
-                    {r.status === "healthy" && <span className="badge badge-success">Healthy</span>}
-                    {r.status === "rotation-failed" && <span className="badge badge-danger">Rotation failed</span>}
-                    {r.status === "stale-cred" && <span className="badge badge-warning">Stale credential</span>}
+                    {window.ZTNAListBadge && window.ztnaStore && window.ztnaStore.resourceAssignments.some(a => a.resource === r.name && !window.ztnaStore.resourceReachable(a.siteId))
+                      ? <ZTNAListBadge resourceName={r.name}/>
+                      : <>
+                          {r.status === "healthy" && <span className="badge badge-success">Healthy</span>}
+                          {r.status === "rotation-failed" && <span className="badge badge-danger">Rotation failed</span>}
+                          {r.status === "stale-cred" && <span className="badge badge-warning">Stale credential</span>}
+                        </>}
                   </td>
                   <td className="t-mono t-tiny" style={{ color: "var(--fg-3)" }}>{r.rotation}</td>
                   <td onClick={e => e.stopPropagation()} style={{ textAlign: "right" }}>
