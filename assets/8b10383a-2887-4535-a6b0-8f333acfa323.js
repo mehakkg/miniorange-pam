@@ -32,6 +32,7 @@ const NAV_GROUPS = [
   { id: "twofactor", icon: "twofactor", label: "Two-factor" }]
 },
 { label: "System", items: [
+  { id: "ztna", icon: "globe", label: "ZTNA Connectors" },
   { id: "settings", icon: "settings", label: "Settings" },
   { id: "customization", icon: "customization", label: "Customization" }]
 }];
