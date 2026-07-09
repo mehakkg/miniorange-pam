@@ -58,10 +58,12 @@ const ZTNA_CERT_EXPIRING_DAYS  = 30;
     // Panel state — the ZTNA surface uses several slide-in and full-page
     // routes. Panel type + payload is centralized here so any component can
     // command navigation.
-    open: null,          // 'concept' | 'site-detail' | 'add-site' | 'add-connector' | 'setup-flow' | 'troubleshoot' | 'cert-renew'
+    open: null,          // 'concept' | 'site-detail' | 'setup-flow' | 'cert-renew'
     detailSiteId: null,
-    troubleConnectorId: null,
     renewConnectorId: null,
+
+    // Setup flow state (Surface D). Populated when open === "setup-flow".
+    setup: null,         // { entry: "new-site" | "existing-site", step, siteId, siteDraft, connectorDraft, token, status }
 
     emit: () => listeners.forEach(fn => fn()),
     subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
@@ -70,7 +72,120 @@ const ZTNA_CERT_EXPIRING_DAYS  = 30;
     // ── mutators ───────────────────────────────────────────
     openConcept:      () => { store.open = "concept";      store.emit(); },
     openSiteDetail:   (id) => { store.detailSiteId = id; store.open = "site-detail"; store.emit(); },
-    close:            () => { store.open = null; store.detailSiteId = null; store.troubleConnectorId = null; store.renewConnectorId = null; store.emit(); },
+    openRenew:        (connId) => { store.renewConnectorId = connId; store.open = "cert-renew"; store.emit(); },
+    // Setup flow entry points:
+    //   openSetupNewSite()          — full 4-step flow, starting at Create site
+    //   openSetupExistingSite(id)   — 3-step flow (Configure → Deploy → Confirm) for an already-created site
+    openSetupNewSite: () => {
+      store.setup = { entry: "new-site", step: 1, siteDraft: { name: "", environment: "AWS", region: "", description: "" }, connectorDraft: { name: "", platform: "Linux", heartbeatSec: 60, certMonths: 12 }, token: null, status: "idle" };
+      store.open = "setup-flow";
+      store.emit();
+    },
+    openSetupExistingSite: (siteId) => {
+      const site = store.sites.find(s => s.id === siteId);
+      store.setup = { entry: "existing-site", step: 1, siteId, siteDraft: site, connectorDraft: { name: "", platform: "Linux", heartbeatSec: 60, certMonths: 12 }, token: null, status: "idle" };
+      store.open = "setup-flow";
+      store.emit();
+    },
+    setupUpdate: (patch) => { store.setup = { ...store.setup, ...patch }; store.emit(); },
+    setupUpdateSite: (patch) => { store.setup = { ...store.setup, siteDraft: { ...store.setup.siteDraft, ...patch } }; store.emit(); },
+    setupUpdateConnector: (patch) => { store.setup = { ...store.setup, connectorDraft: { ...store.setup.connectorDraft, ...patch } }; store.emit(); },
+    setupNext: () => { store.setup = { ...store.setup, step: store.setup.step + 1 }; store.emit(); },
+    setupBack: () => { store.setup = { ...store.setup, step: Math.max(1, store.setup.step - 1) }; store.emit(); },
+    // Generate an enrollment token; also persist the site + connector records
+    // so if the admin closes the flow the site sticks around in Not-enrolled
+    // state (spec: "deploy later" should save records, not silently discard).
+    setupGenerateToken: () => {
+      const s = store.setup;
+      let siteId = s.siteId;
+      if (s.entry === "new-site" && !siteId) {
+        siteId = "site-" + Math.random().toString(36).slice(2, 8);
+        store.sites = [...store.sites, { id: siteId, name: s.siteDraft.name, environment: s.siteDraft.environment, region: s.siteDraft.region, description: s.siteDraft.description, createdAt: now }];
+      }
+      const connectorId = "conn-" + Math.random().toString(36).slice(2, 8);
+      const token = `eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.${btoa(JSON.stringify({ site: siteId, connector: connectorId, iat: now, exp: now + 24 * 3600 * 1000 })).replace(/=+$/, "")}.demo-signature-${Math.random().toString(36).slice(2, 10)}`;
+      store.connectors = [...store.connectors, {
+        id: connectorId, siteId, name: s.connectorDraft.name, platform: s.connectorDraft.platform,
+        heartbeatIntervalSec: s.connectorDraft.heartbeatSec,
+        // Not-enrolled until first heartbeat. Marked with a far-past
+        // lastHeartbeatMs so connectorStatus() returns "offline" until the
+        // simulated connect fires.
+        lastHeartbeatMs: 0,
+        certExpiresAt: now + s.connectorDraft.certMonths * 30 * 86400000,
+        latencyMs: null,
+        enrolling: true,
+      }];
+      store.setup = { ...store.setup, siteId, connectorId, token, step: s.entry === "new-site" ? 3 : 2, status: "waiting", waitStartTs: Date.now() };
+      // Simulate the connector dialing in after 6 seconds. In prod this would
+      // be a real webhook or long-poll — for the demo, setTimeout is fine.
+      if (store._setupTimer) clearTimeout(store._setupTimer);
+      store._setupTimer = setTimeout(() => {
+        if (!store.setup || store.setup.connectorId !== connectorId) return;
+        store.connectors = store.connectors.map(c => c.id === connectorId ? { ...c, lastHeartbeatMs: now, enrolling: false, latencyMs: 45 } : c);
+        store.events = [{ ts: now, siteId, connectorId, kind: "created", message: "Connector enrolled" }, { ts: now, siteId, connectorId, kind: "heartbeat", message: "First heartbeat received" }, ...store.events];
+        store.setup = { ...store.setup, status: "connected" };
+        store.emit();
+        // Auto-advance to Confirm after the 1.5s success animation.
+        setTimeout(() => {
+          if (!store.setup || store.setup.connectorId !== connectorId) return;
+          store.setup = { ...store.setup, step: store.setup.entry === "new-site" ? 4 : 3 };
+          store.emit();
+        }, 1500);
+      }, 6000);
+      store.emit();
+    },
+    setupForceTimeout: () => {
+      if (!store.setup) return;
+      store.setup = { ...store.setup, status: "timeout" };
+      store.emit();
+    },
+    setupRegenerateToken: () => {
+      if (!store.setup) return;
+      // Rotate the token but keep the same connectorId — matches how a real
+      // enrollment endpoint would behave.
+      const newToken = `eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.${btoa(JSON.stringify({ site: store.setup.siteId, connector: store.setup.connectorId, iat: Date.now(), exp: Date.now() + 24 * 3600 * 1000 })).replace(/=+$/, "")}.demo-signature-${Math.random().toString(36).slice(2, 10)}`;
+      store.setup = { ...store.setup, token: newToken, status: "waiting" };
+      store.emit();
+    },
+    setupSimulateConnect: () => {
+      // Manual override for the demo — instantly complete Step 3.
+      if (!store.setup) return;
+      if (store._setupTimer) clearTimeout(store._setupTimer);
+      const connectorId = store.setup.connectorId;
+      store.connectors = store.connectors.map(c => c.id === connectorId ? { ...c, lastHeartbeatMs: now, enrolling: false, latencyMs: 45 } : c);
+      store.events = [{ ts: now, siteId: store.setup.siteId, connectorId, kind: "created", message: "Connector enrolled" }, ...store.events];
+      store.setup = { ...store.setup, status: "connected" };
+      store.emit();
+      setTimeout(() => {
+        if (!store.setup || store.setup.connectorId !== connectorId) return;
+        store.setup = { ...store.setup, step: store.setup.entry === "new-site" ? 4 : 3 };
+        store.emit();
+      }, 1500);
+    },
+    // Certificate renewal simulation
+    renewGenerate: (months) => {
+      const c = store.connectors.find(cc => cc.id === store.renewConnectorId);
+      if (!c) return;
+      store.renewMonths = months;
+      store.renewStatus = "waiting";
+      store.emit();
+      setTimeout(() => {
+        if (store.renewConnectorId !== c.id) return;
+        store.connectors = store.connectors.map(cc => cc.id === c.id ? { ...cc, certExpiresAt: now + months * 30 * 86400000 } : cc);
+        store.events = [{ ts: now, siteId: c.siteId, connectorId: c.id, kind: "cert-renew", message: `Certificate renewed — valid ${months} months` }, ...store.events];
+        store.renewStatus = "done";
+        store.emit();
+      }, 4000);
+    },
+    close: () => {
+      if (store._setupTimer) { clearTimeout(store._setupTimer); store._setupTimer = null; }
+      store.open = null; store.detailSiteId = null; store.renewConnectorId = null;
+      store.renewStatus = null; store.renewMonths = null;
+      // Leave setup state intact if the flow is in "waiting" state — user
+      // chose deploy-later. Otherwise clear it so a fresh flow starts clean.
+      if (store.setup && store.setup.status !== "waiting" && store.setup.status !== "timeout") store.setup = null;
+      store.emit();
+    },
 
     // ── health computation ─────────────────────────────────
     // Connector status is derived from lastHeartbeatMs + cert data. Sites
@@ -286,7 +401,7 @@ const ZTNASiteDetailPanel = () => {
           <section>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
               <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>Connectors ({conns.length})</div>
-              <button className="btn btn-sm" onClick={() => window.pamToast && window.pamToast("Add-connector flow arrives in Phase 2", "info")}>+ Add connector</button>
+              <button className="btn btn-sm" onClick={() => window.ztnaStore.openSetupExistingSite(site.id)}>+ Add connector</button>
             </div>
             {conns.length === 0 ? (
               <div style={{ padding: 14, background: "var(--bg-surface-2)", borderRadius: 6, font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)", textAlign: "center" }}>
@@ -357,7 +472,7 @@ const ZTNAConnectorRow = ({ c, compact }) => {
         </button>
       )}
       {certSoon && status !== "offline" && (
-        <button className="btn btn-sm" onClick={() => window.pamToast && window.pamToast("Cert renewal flow arrives in Phase 3", "info")}>
+        <button className="btn btn-sm" onClick={() => window.ztnaStore.openRenew(c.id)}>
           Renew →
         </button>
       )}
@@ -387,7 +502,7 @@ const ZTNASiteCard = ({ site }) => {
         {status === "partial" && <span className="t-tiny" style={{ color: "var(--warning-fg)", fontWeight: 500 }}>{onlineCount}/{totalCount} connectors online</span>}
         <div style={{ flex: 1 }}/>
         <button className="btn btn-sm" onClick={() => window.ztnaStore.openSiteDetail(site.id)}><Icon name="edit" size={12}/></button>
-        <button className="btn btn-sm" onClick={() => window.pamToast && window.pamToast("Add-connector flow arrives in Phase 2", "info")}>+ Add connector</button>
+        <button className="btn btn-sm" onClick={() => window.ztnaStore.openSetupExistingSite(site.id)}>+ Add connector</button>
       </div>
 
       {/* All-offline banner */}
@@ -406,7 +521,7 @@ const ZTNASiteCard = ({ site }) => {
             <div style={{ padding: 12, background: "var(--bg-surface-2)", borderRadius: 6, textAlign: "center" }}>
               <div style={{ font: "500 12.5px/1.4 var(--font-sans)", color: "var(--fg-2)" }}>No connectors deployed</div>
               <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", margin: "4px 0 8px" }}>Resources assigned here cannot be reached.</div>
-              <button className="btn btn-sm btn-primary" onClick={() => window.pamToast && window.pamToast("Setup flow arrives in Phase 2", "info")}>+ Add connector</button>
+              <button className="btn btn-sm btn-primary" onClick={() => window.ztnaStore.openSetupNewSite()}>+ Add connector</button>
             </div>
           ) : conns.map(c => <ZTNAConnectorRow key={c.id} c={c}/>)}
         </div>
@@ -483,7 +598,7 @@ const ZTNAEmptyState = () => (
     </div>
 
     <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
-      <button className="btn btn-primary" onClick={() => window.pamToast && window.pamToast("Setup flow arrives in Phase 2", "info")}>
+      <button className="btn btn-primary" onClick={() => window.ztnaStore.openSetupNewSite()}>
         + Create your first site
       </button>
       <button className="btn btn-ghost" onClick={() => window.ztnaStore.openConcept()}>
@@ -575,7 +690,7 @@ const ZTNAConnectorsPage = () => {
         title="ZTNA Connectors"
         description="Connect PAM to private networks without opening inbound ports. Deploy connectors inside your network — they dial out to PAM."
         action={!isEmpty && (
-          <button className="btn btn-primary" onClick={() => window.pamToast && window.pamToast("Add-site flow arrives in Phase 2", "info")}>
+          <button className="btn btn-primary" onClick={() => window.ztnaStore.openSetupNewSite()}>
             + Add site
           </button>
         )}
@@ -599,15 +714,612 @@ const ZTNAConnectorsPage = () => {
         </>
       )}
 
-      {/* Overlays / panels */}
+    </div>
+  );
+};
+
+// =========================================================
+// GLOBAL CONTROLLER — mounted once at app root. Renders ZTNA overlays
+// regardless of which page the user is on, so surfaces like the resource
+// wizard can command ztnaStore.openSetupNewSite() and get a working flow.
+// =========================================================
+const ZTNAController = () => {
+  const store = window.useZtna();
+  return (
+    <>
       {store.open === "concept"     && <ZTNAConceptPanel/>}
       {store.open === "site-detail" && <ZTNASiteDetailPanel/>}
+      {store.open === "setup-flow"  && <ZTNASetupFlow/>}
+      {store.open === "cert-renew"  && <ZTNACertRenewPanel/>}
+    </>
+  );
+};
+
+// =========================================================
+// SETUP FLOW (Surface D) — full-page, not a panel.
+// Progress indicator adapts to entry point:
+//   entry === "new-site":       [1 Create site] [2 Configure] [3 Deploy] [4 Confirm]
+//   entry === "existing-site":  [1 Configure]   [2 Deploy]    [3 Confirm]
+// =========================================================
+
+const ZTNA_SETUP_STEPS = {
+  "new-site":      ["Create site",       "Configure connector", "Deploy",             "Confirm"],
+  "existing-site": ["Configure connector", "Deploy",            "Confirm"],
+};
+
+const ZTNAStepIndicator = ({ entry, step }) => {
+  const labels = ZTNA_SETUP_STEPS[entry];
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "18px 32px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-app)" }}>
+      {labels.map((l, i) => {
+        const n = i + 1;
+        const done = n < step, active = n === step;
+        return (
+          <React.Fragment key={l}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{
+                width: 24, height: 24, borderRadius: "50%",
+                background: done ? "var(--brand-fg)" : active ? "var(--brand-soft)" : "var(--bg-surface-2)",
+                color: done ? "#fff" : active ? "var(--brand-fg)" : "var(--fg-4)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                font: "700 11.5px/1 var(--font-sans)",
+                border: active ? "1.5px solid var(--brand-fg)" : "none",
+              }}>{done ? "✓" : n}</div>
+              <span style={{ font: `${active ? 600 : 500} 12.5px/1 var(--font-sans)`, color: active ? "var(--fg-1)" : done ? "var(--fg-2)" : "var(--fg-4)" }}>{l}</span>
+            </div>
+            {i < labels.length - 1 && <div style={{ flex: "0 0 40px", height: 1, background: done ? "var(--brand-fg)" : "var(--border)" }}/>}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+};
+
+// -------- Step 1 (new-site) · Create site --------
+const ZTNASetupCreateSite = ({ s }) => (
+  <div style={{ maxWidth: 640, margin: "32px auto", padding: "0 32px", display: "flex", flexDirection: "column", gap: 20 }}>
+    <div>
+      <h1 style={{ font: "700 22px/1.2 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Create a site</h1>
+      <p style={{ font: "400 13.5px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "6px 0 0" }}>A site represents a private network location — like a VPC, data center, or office network.</p>
+    </div>
+
+    <Field label="Site display name" required hint="Use a name that makes sense to your team — this is how the site appears on resources.">
+      <input className="input" autoFocus value={s.siteDraft.name} onChange={e => window.ztnaStore.setupUpdateSite({ name: e.target.value })} placeholder="e.g. AWS Mumbai VPC, Frankfurt DC, HQ On-prem"/>
+    </Field>
+
+    <Field label="Network / region" hint="Cloud region, on-prem site label, or leave empty.">
+      <input className="input" value={s.siteDraft.region} onChange={e => window.ztnaStore.setupUpdateSite({ region: e.target.value })} placeholder="e.g. ap-south-1, eu-central-1, on-prem"/>
+    </Field>
+
+    <Field label="Environment" required>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 6 }}>
+        {["AWS", "Azure", "GCP", "On-prem", "Other"].map(e => (
+          <button key={e} onClick={() => window.ztnaStore.setupUpdateSite({ environment: e })} style={{
+            padding: "10px 8px", border: `1.5px solid ${s.siteDraft.environment === e ? "var(--brand-fg)" : "var(--border)"}`,
+            background: s.siteDraft.environment === e ? "var(--brand-soft)" : "#fff",
+            color: s.siteDraft.environment === e ? "var(--brand-fg)" : "var(--fg-2)",
+            font: `${s.siteDraft.environment === e ? 700 : 500} 12.5px/1 var(--font-sans)`,
+            borderRadius: 6, cursor: "pointer",
+          }}>{e}</button>
+        ))}
+      </div>
+    </Field>
+
+    <Field label="Description" hint="What resources live in this network? Helps other admins understand the site's scope.">
+      <textarea className="input" rows={3} value={s.siteDraft.description} onChange={e => window.ztnaStore.setupUpdateSite({ description: e.target.value })} placeholder="e.g. Primary APAC region — ledger + auth + reporting DBs."/>
+    </Field>
+  </div>
+);
+
+// -------- Configure connector step --------
+const ZTNASetupConfigureConnector = ({ s, siteName }) => (
+  <div style={{ maxWidth: 640, margin: "32px auto", padding: "0 32px", display: "flex", flexDirection: "column", gap: 20 }}>
+    <div>
+      <h1 style={{ font: "700 22px/1.2 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Configure connector</h1>
+      <p style={{ font: "400 13.5px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "6px 0 0" }}>Add a connector record in PAM. You'll deploy it in the next step.</p>
+    </div>
+    <div style={{ padding: "8px 12px", background: "var(--bg-surface-2)", borderRadius: 6, font: "500 12px/1.4 var(--font-sans)", color: "var(--fg-2)" }}>
+      Site: <strong>{siteName}</strong> · <ZTNADot status="online"/>
+    </div>
+
+    <Field label="Connector display name" required hint="Use a descriptive name — you may add more connectors to this site later for redundancy.">
+      <input className="input" autoFocus value={s.connectorDraft.name} onChange={e => window.ztnaStore.setupUpdateConnector({ name: e.target.value })} placeholder="e.g. mumbai-connector-01"/>
+    </Field>
+
+    <Field label="Platform" required>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+        {[
+          { v: "Linux",   hint: "Recommended for most server environments" },
+          { v: "Windows", hint: "For Windows Server environments" },
+          { v: "Docker",  hint: "For containerized environments" },
+        ].map(p => {
+          const sel = s.connectorDraft.platform === p.v;
+          return (
+            <button key={p.v} onClick={() => window.ztnaStore.setupUpdateConnector({ platform: p.v })} style={{
+              padding: 14, border: `1.5px solid ${sel ? "var(--brand-fg)" : "var(--border)"}`,
+              background: sel ? "var(--brand-soft)" : "#fff", textAlign: "left",
+              borderRadius: 8, cursor: "pointer", display: "flex", flexDirection: "column", gap: 4,
+            }}>
+              <span style={{ font: `${sel ? 700 : 600} 13px/1 var(--font-sans)`, color: sel ? "var(--brand-fg)" : "var(--fg-1)" }}>{p.v}</span>
+              <span style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-3)" }}>{p.hint}</span>
+            </button>
+          );
+        })}
+      </div>
+    </Field>
+
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+      <Field label="Heartbeat interval" hint="Lower = faster failure detection, higher = less network noise.">
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input className="input" type="number" value={s.connectorDraft.heartbeatSec} onChange={e => window.ztnaStore.setupUpdateConnector({ heartbeatSec: +e.target.value })} style={{ width: 100 }}/>
+          <span style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-3)" }}>seconds</span>
+        </div>
+      </Field>
+      <Field label="Certificate validity" hint="PAM auto-generates a certificate for the outbound tunnel.">
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input className="input" type="number" value={s.connectorDraft.certMonths} onChange={e => window.ztnaStore.setupUpdateConnector({ certMonths: +e.target.value })} style={{ width: 100 }}/>
+          <span style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-3)" }}>months</span>
+        </div>
+      </Field>
+    </div>
+  </div>
+);
+
+// -------- Deploy step (enrollment token) --------
+const ZTNASetupDeploy = ({ s, siteName }) => {
+  const [copied, setCopied] = React.useState(false);
+  const [altOpen, setAltOpen] = React.useState(false);
+  const command = `curl -sSL https://pam.northwind.com/install/connector.sh | \\
+  bash -s -- --token ${s.token} \\
+  --site ${s.siteId} \\
+  --connector ${s.connectorDraft.name}`;
+  const winCommand = `Invoke-WebRequest https://pam.northwind.com/install/connector.ps1 -OutFile connector.ps1
+.\\connector.ps1 -Token '${s.token}' -Site '${s.siteId}' -Connector '${s.connectorDraft.name}'`;
+  const dockerCommand = `docker run -d --name pam-connector --restart=always \\
+  -e PAM_TOKEN=${s.token} \\
+  -e PAM_SITE=${s.siteId} \\
+  -e PAM_CONNECTOR=${s.connectorDraft.name} \\
+  pam/connector:latest`;
+
+  const copy = () => {
+    navigator.clipboard.writeText(command);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div style={{ maxWidth: 800, margin: "32px auto", padding: "0 32px", display: "flex", flexDirection: "column", gap: 20 }}>
+      <div>
+        <h1 style={{ font: "700 22px/1.2 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Deploy your connector</h1>
+        <p style={{ font: "400 13.5px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "6px 0 0" }}>Run this command inside your private network. The connector will dial out to PAM automatically.</p>
+      </div>
+
+      <div style={{ padding: "8px 12px", background: "var(--bg-surface-2)", borderRadius: 6, font: "500 12px/1.4 var(--font-sans)", color: "var(--fg-2)" }}>
+        Site: <strong>{siteName}</strong> · Connector: <strong>{s.connectorDraft.name}</strong> · Platform: <strong>{s.connectorDraft.platform}</strong>
+      </div>
+
+      <div className="card" style={{ padding: 0, overflow: "hidden", border: "2px solid var(--brand-fg)" }}>
+        <div style={{ padding: "10px 16px", background: "var(--brand-soft)", display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ font: "700 11px/1 var(--font-sans)", color: "var(--brand-fg)", textTransform: "uppercase", letterSpacing: 0.6 }}>Enrollment token</span>
+          <span style={{ padding: "2px 8px", background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 999, font: "600 10.5px/1 var(--font-sans)" }}>Valid for 24 hours</span>
+        </div>
+        <pre style={{ margin: 0, padding: 16, background: "#0F1115", color: "#DFE3E8", font: "500 12.5px/1.6 var(--font-mono)", overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+{s.connectorDraft.platform === "Windows" ? winCommand : s.connectorDraft.platform === "Docker" ? dockerCommand : command}
+        </pre>
+        <div style={{ padding: 12, display: "flex", gap: 8, background: "var(--bg-surface)" }}>
+          <button className="btn btn-primary btn-sm" onClick={copy}>
+            <Icon name="copy" size={12}/> {copied ? "Copied ✓" : "Copy command"}
+          </button>
+          <button className="btn btn-sm" onClick={() => { if (confirm("This will invalidate the current token. Only do this if you've lost the command.")) window.ztnaStore.setupRegenerateToken(); }}>
+            Regenerate token
+          </button>
+          <div style={{ flex: 1 }}/>
+          <button className="btn btn-sm btn-ghost" onClick={() => setAltOpen(!altOpen)}>
+            Show alternatives {altOpen ? "↑" : "↓"}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ padding: 10, background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 4, font: "500 12px/1.5 var(--font-sans)", display: "flex", alignItems: "flex-start", gap: 8 }}>
+        <Icon name="alert-circle" size={13} color="var(--warning-fg)"/>
+        <span>This token is single-use. Once the connector connects successfully, the token is invalidated. Do not share this token.</span>
+      </div>
+
+      {altOpen && (
+        <div className="card" style={{ padding: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+          <div>
+            <div style={{ font: "600 11px/1.4 var(--font-sans)", color: "var(--fg-3)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 }}>Linux (bash)</div>
+            <pre style={{ margin: 0, padding: 10, background: "var(--bg-surface-2)", color: "var(--fg-1)", font: "500 11.5px/1.5 var(--font-mono)", borderRadius: 4, overflow: "auto", whiteSpace: "pre-wrap" }}>{command}</pre>
+          </div>
+          <div>
+            <div style={{ font: "600 11px/1.4 var(--font-sans)", color: "var(--fg-3)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 }}>Windows (PowerShell)</div>
+            <pre style={{ margin: 0, padding: 10, background: "var(--bg-surface-2)", color: "var(--fg-1)", font: "500 11.5px/1.5 var(--font-mono)", borderRadius: 4, overflow: "auto", whiteSpace: "pre-wrap" }}>{winCommand}</pre>
+          </div>
+          <div>
+            <div style={{ font: "600 11px/1.4 var(--font-sans)", color: "var(--fg-3)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 }}>Docker</div>
+            <pre style={{ margin: 0, padding: 10, background: "var(--bg-surface-2)", color: "var(--fg-1)", font: "500 11.5px/1.5 var(--font-mono)", borderRadius: 4, overflow: "auto", whiteSpace: "pre-wrap" }}>{dockerCommand}</pre>
+          </div>
+        </div>
+      )}
+
+      {/* Waiting / connected / timeout states */}
+      <div style={{ padding: 20, background: "#fff", border: "1px solid var(--border)", borderRadius: 8, textAlign: "center" }}>
+        {s.status === "waiting" && (
+          <>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 10, font: "600 14px/1.3 var(--font-sans)", color: "var(--brand-fg)" }}>
+              <Spinner size={14}/>
+              <span>Waiting for connector to connect…</span>
+            </div>
+            <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-4)", marginTop: 6 }}>PAM is listening for the first heartbeat from <span className="t-mono">{s.connectorDraft.name}</span>.</div>
+            <div style={{ marginTop: 12, display: "flex", gap: 8, justifyContent: "center" }}>
+              <button className="btn btn-sm" onClick={() => window.ztnaStore.setupSimulateConnect()} style={{ fontSize: 11 }}>[Demo] Simulate connect</button>
+              <button className="btn btn-sm btn-ghost" onClick={() => window.ztnaStore.setupForceTimeout()} style={{ fontSize: 11 }}>[Demo] Force timeout</button>
+            </div>
+          </>
+        )}
+        {s.status === "connected" && (
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 10, font: "700 15px/1.3 var(--font-sans)", color: "var(--success-fg)" }}>
+            <div style={{ width: 24, height: 24, borderRadius: "50%", background: "var(--success-soft)", color: "var(--success-fg)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>✓</div>
+            <span>{s.connectorDraft.name} connected!</span>
+          </div>
+        )}
+        {s.status === "timeout" && (
+          <div style={{ textAlign: "left" }}>
+            <div style={{ font: "600 13.5px/1.3 var(--font-sans)", color: "var(--warning-fg)" }}>Taking longer than expected? Common reasons:</div>
+            <ul style={{ font: "400 12.5px/1.6 var(--font-sans)", color: "var(--fg-2)", margin: "8px 0 0 18px" }}>
+              <li>Are you running the command as root / with sudo?</li>
+              <li>Can the VM reach pam.northwind.com on port 443 outbound?</li>
+              <li>Is the VM's system clock correct? Token validation requires accurate time.</li>
+            </ul>
+            <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+              <button className="btn btn-sm">View troubleshooting guide →</button>
+              <button className="btn btn-sm btn-ghost" onClick={() => window.ztnaStore.setupRegenerateToken()}>Regenerate token</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ textAlign: "center", marginTop: 8 }}>
+        <button className="btn btn-ghost" onClick={() => window.ztnaStore.close()} style={{ color: "var(--fg-3)" }}>
+          I'll deploy this later →
+        </button>
+        <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 4 }}>
+          Your site + connector record will be saved in Not-enrolled state. The token remains valid for 24 hours.
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// -------- Confirm step --------
+const ZTNASetupConfirm = ({ s, siteName }) => {
+  const site = window.ztnaStore.sites.find(ss => ss.id === s.siteId);
+  const connector = window.ztnaStore.connectors.find(c => c.id === s.connectorId);
+  return (
+    <div style={{ maxWidth: 720, margin: "48px auto", padding: "0 32px", display: "flex", flexDirection: "column", gap: 22, textAlign: "center" }}>
+      <div>
+        <div style={{ width: 72, height: 72, borderRadius: "50%", background: "var(--success-soft)", color: "var(--success-fg)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 32, marginBottom: 12 }}>✓</div>
+        <h1 style={{ font: "700 24px/1.2 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>{siteName} is ready</h1>
+        <div style={{ font: "400 13.5px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "8px auto 0", maxWidth: 460 }}>Your connector is online. Assign resources to this site to start routing through it.</div>
+      </div>
+
+      <div className="card" style={{ padding: 16, border: "2px solid var(--success-fg)", textAlign: "left" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", rowGap: 8, columnGap: 12, font: "400 12.5px/1.5 var(--font-sans)" }}>
+          <span style={{ color: "var(--fg-4)" }}>Site</span><span style={{ color: "var(--fg-1)", fontWeight: 500 }}>{siteName} <ZTNAStatusBadge status="online" size="sm"/></span>
+          <span style={{ color: "var(--fg-4)" }}>Connector</span><span className="t-mono">{connector?.name} <span style={{ color: "var(--fg-4)" }}>({connector?.platform})</span> <ZTNAStatusBadge status="online" size="sm"/></span>
+          <span style={{ color: "var(--fg-4)" }}>Last heartbeat</span><span style={{ color: "var(--fg-1)" }}>just now</span>
+          <span style={{ color: "var(--fg-4)" }}>Certificate</span><span style={{ color: "var(--fg-1)" }}>Valid until {connector ? new Date(connector.certExpiresAt).toLocaleDateString("en-US", { month: "short", year: "numeric" }) : "—"}</span>
+        </div>
+      </div>
+
+      <div>
+        <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 12, textAlign: "left" }}>What's next</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+          {[
+            { icon: "server",   title: "Assign your first resource", body: "Tell PAM which resources live in this site.",  cta: "Go to Resources →", onClick: () => window.pamToast && window.pamToast("Resource wizard integration lives on the Resources page — try adding a new resource with a private IP", "info") },
+            { icon: "plus",     title: "Add another connector",       body: "Redundancy protects against single-connector outages.", cta: "Add connector →", onClick: () => window.ztnaStore.openSetupExistingSite(s.siteId) },
+            { icon: "database", title: "Configure more sites",        body: "You can have sites for different networks.",  cta: "Add another site →", onClick: () => window.ztnaStore.openSetupNewSite() },
+          ].map((c, i) => (
+            <div key={i} className="card" style={{ padding: 14, textAlign: "left", display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ width: 32, height: 32, borderRadius: 6, background: "var(--brand-soft)", color: "var(--brand-fg)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <Icon name={c.icon} size={16} color="var(--brand-fg)"/>
+              </div>
+              <div style={{ font: "600 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{c.title}</div>
+              <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)", flex: 1 }}>{c.body}</div>
+              <button className="btn btn-sm" onClick={c.onClick} style={{ alignSelf: "flex-start", marginTop: 4 }}>{c.cta}</button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <button className="btn" onClick={() => window.ztnaStore.close()} style={{ alignSelf: "center", marginTop: 8, padding: "10px 18px" }}>
+        Done
+      </button>
+    </div>
+  );
+};
+
+// -------- Setup flow shell --------
+const ZTNASetupFlow = () => {
+  const store = window.useZtna();
+  const s = store.setup;
+  if (!s) return null;
+  const siteName = s.entry === "new-site" ? (s.siteDraft?.name || "Untitled site") : (store.sites.find(ss => ss.id === s.siteId)?.name || "");
+
+  // Compute which body to render given the entry + step.
+  let body = null;
+  if (s.entry === "new-site") {
+    if (s.step === 1) body = <ZTNASetupCreateSite s={s}/>;
+    if (s.step === 2) body = <ZTNASetupConfigureConnector s={s} siteName={siteName}/>;
+    if (s.step === 3) body = <ZTNASetupDeploy s={s} siteName={siteName}/>;
+    if (s.step === 4) body = <ZTNASetupConfirm s={s} siteName={siteName}/>;
+  } else {
+    if (s.step === 1) body = <ZTNASetupConfigureConnector s={s} siteName={siteName}/>;
+    if (s.step === 2) body = <ZTNASetupDeploy s={s} siteName={siteName}/>;
+    if (s.step === 3) body = <ZTNASetupConfirm s={s} siteName={siteName}/>;
+  }
+
+  // Footer only shows on non-final, non-token steps. Step 3 (deploy) has its
+  // own "I'll deploy later" affordance so the standard footer is hidden.
+  const isDeployStep  = (s.entry === "new-site" && s.step === 3) || (s.entry === "existing-site" && s.step === 2);
+  const isConfirmStep = (s.entry === "new-site" && s.step === 4) || (s.entry === "existing-site" && s.step === 3);
+  const nextDisabled = (() => {
+    if (s.entry === "new-site" && s.step === 1) return !s.siteDraft.name.trim();
+    if ((s.entry === "new-site" && s.step === 2) || (s.entry === "existing-site" && s.step === 1)) return !s.connectorDraft.name.trim();
+    return false;
+  })();
+
+  const onNext = () => {
+    // Configure step → generate token + advance to Deploy
+    const configureStep = (s.entry === "new-site" && s.step === 2) || (s.entry === "existing-site" && s.step === 1);
+    if (configureStep) { window.ztnaStore.setupGenerateToken(); return; }
+    window.ztnaStore.setupNext();
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 250, background: "var(--bg-app)", display: "flex", flexDirection: "column" }}>
+      {/* Chrome header */}
+      <div style={{ padding: "14px 32px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 12, background: "#fff" }}>
+        <div style={{ width: 32, height: 32, borderRadius: 6, background: "var(--brand-soft)", color: "var(--brand-fg)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
+          <Icon name="globe" size={16} color="var(--brand-fg)"/>
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={{ font: "700 14px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>ZTNA connector setup</div>
+          <div style={{ font: "400 12px/1.3 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>{s.entry === "new-site" ? "Setting up a new site + connector" : `Adding a connector to ${siteName}`}</div>
+        </div>
+        <button className="btn btn-ghost btn-icon" onClick={() => window.ztnaStore.close()} aria-label="Close"><Icon name="x" size={14}/></button>
+      </div>
+
+      <ZTNAStepIndicator entry={s.entry} step={s.step}/>
+
+      <div className="scroll-area" style={{ flex: 1, overflow: "auto" }}>
+        {body}
+      </div>
+
+      {!isDeployStep && !isConfirmStep && (
+        <div style={{ padding: "14px 32px", borderTop: "1px solid var(--border)", display: "flex", gap: 8, background: "#fff" }}>
+          <button className="btn btn-ghost" onClick={() => window.ztnaStore.close()}>Cancel</button>
+          <div style={{ flex: 1 }}/>
+          {s.step > 1 && <button className="btn" onClick={() => window.ztnaStore.setupBack()}>← Back</button>}
+          <button className="btn btn-primary" disabled={nextDisabled} onClick={onNext} style={nextDisabled ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
+            {(s.entry === "new-site" && s.step === 2) || (s.entry === "existing-site" && s.step === 1) ? "Generate enrollment token →" : "Next →"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// =========================================================
+// CERTIFICATE RENEWAL PANEL (Surface G · cert-expiring flow)
+// =========================================================
+const ZTNACertRenewPanel = () => {
+  const store = window.useZtna();
+  const c = store.connectors.find(cc => cc.id === store.renewConnectorId);
+  const [months, setMonths] = React.useState(12);
+  if (!c) return null;
+  const site = store.sites.find(s => s.id === c.siteId);
+  const daysLeft = store.certDaysLeft(c);
+  const command = `curl -sSL https://pam.northwind.com/install/renew.sh | bash -s -- \\
+  --connector ${c.name} \\
+  --months ${months}`;
+  const [copied, setCopied] = React.useState(false);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 200, background: "rgba(0,0,0,0.35)", display: "flex", justifyContent: "flex-end" }} onClick={() => window.ztnaStore.close()}>
+      <aside onClick={e => e.stopPropagation()} style={{ width: 480, maxWidth: "100vw", background: "#fff", height: "100%", display: "flex", flexDirection: "column", boxShadow: "-24px 0 60px rgba(0,0,0,0.14)" }}>
+        <div style={{ padding: "16px 22px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ font: "700 15px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>Renew certificate</div>
+            <div className="t-mono t-tiny" style={{ color: "var(--fg-3)", marginTop: 2 }}>{c.name} · {site?.name}</div>
+          </div>
+          <button className="btn btn-ghost btn-icon" onClick={() => window.ztnaStore.close()} aria-label="Close"><Icon name="x" size={14}/></button>
+        </div>
+
+        <div className="scroll-area" style={{ flex: 1, overflow: "auto", padding: 22, display: "flex", flexDirection: "column", gap: 18 }}>
+          <div style={{ padding: 12, background: daysLeft <= 0 ? "var(--danger-soft)" : "var(--warning-soft)", color: daysLeft <= 0 ? "var(--danger-fg)" : "var(--warning-fg)", borderRadius: 6, font: "500 12.5px/1.4 var(--font-sans)" }}>
+            {daysLeft <= 0
+              ? "⚑ Certificate expired. The connector cannot verify its identity."
+              : `⚠ Current cert expires in ${daysLeft} days (${new Date(c.certExpiresAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}).`}
+          </div>
+
+          {store.renewStatus === "done" ? (
+            <div style={{ padding: 16, background: "var(--success-soft)", borderRadius: 6, textAlign: "center" }}>
+              <div style={{ width: 40, height: 40, borderRadius: "50%", background: "var(--success-fg)", color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 20, marginBottom: 8 }}>✓</div>
+              <div style={{ font: "600 13.5px/1.3 var(--font-sans)", color: "var(--success-fg)" }}>Certificate renewed</div>
+              <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--success-fg)", marginTop: 4 }}>Valid until {new Date(c.certExpiresAt).toLocaleDateString("en-US", { month: "long", year: "numeric" })}</div>
+            </div>
+          ) : store.renewStatus === "waiting" ? (
+            <>
+              <div style={{ padding: 12, background: "var(--bg-surface)", border: "2px solid var(--brand-fg)", borderRadius: 8 }}>
+                <div style={{ font: "600 11px/1 var(--font-sans)", color: "var(--brand-fg)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 8 }}>Run this on the connector host</div>
+                <pre style={{ margin: 0, padding: 10, background: "#0F1115", color: "#DFE3E8", font: "500 11.5px/1.5 var(--font-mono)", borderRadius: 4, overflow: "auto", whiteSpace: "pre-wrap" }}>{command}</pre>
+                <button className="btn btn-sm btn-primary" style={{ marginTop: 8 }} onClick={() => { navigator.clipboard.writeText(command); setCopied(true); setTimeout(() => setCopied(false), 2000); }}>
+                  <Icon name="copy" size={11}/> {copied ? "Copied ✓" : "Copy command"}
+                </button>
+              </div>
+              <div style={{ display: "inline-flex", alignItems: "center", gap: 8, font: "500 12.5px/1 var(--font-sans)", color: "var(--brand-fg)" }}>
+                <Spinner size={12}/> Waiting for connector to apply new certificate…
+              </div>
+            </>
+          ) : (
+            <>
+              <Field label="New cert validity">
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input className="input" type="number" value={months} onChange={e => setMonths(+e.target.value)} style={{ width: 100 }}/>
+                  <span style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-3)" }}>months</span>
+                </div>
+              </Field>
+              <button className="btn btn-primary" onClick={() => window.ztnaStore.renewGenerate(months)}>
+                Generate renewal certificate
+              </button>
+            </>
+          )}
+        </div>
+      </aside>
+    </div>
+  );
+};
+
+// =========================================================
+// SITE PICKER (Surface E · resource wizard)
+// Public API: <ZTNASitePicker value={siteId} onChange={fn} />
+// =========================================================
+const ZTNASitePicker = ({ value, onChange }) => {
+  const store = window.useZtna();
+  const sites = store.sites;
+  if (sites.length === 0) {
+    return (
+      <div style={{ padding: 14, background: "var(--bg-surface-2)", borderRadius: 6, textAlign: "center" }}>
+        <div style={{ font: "600 12.5px/1.4 var(--font-sans)", color: "var(--fg-2)" }}>No sites configured</div>
+        <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-4)", margin: "4px 0 10px" }}>Create a site and deploy a connector before assigning resources.</div>
+        <button className="btn btn-sm btn-primary" onClick={() => window.ztnaStore.openSetupNewSite()}>
+          Set up your first site →
+        </button>
+      </div>
+    );
+  }
+  const selectedSite = sites.find(s => s.id === value);
+  return (
+    <>
+      <select className="input" value={value || ""} onChange={e => onChange(e.target.value)}>
+        <option value="">Which site is this resource behind?</option>
+        {sites.map(s => {
+          const conns = store.siteConnectors(s.id);
+          const status = store.siteStatus(s.id);
+          const onlineCount = conns.filter(c => store.connectorStatus(c) === "online").length;
+          return (
+            <option key={s.id} value={s.id}>
+              {ZTNA_STATUS[status]?.glyph || "●"} {s.name} · {s.environment} · {conns.length} connectors ({onlineCount}/{conns.length} online)
+            </option>
+          );
+        })}
+      </select>
+
+      {selectedSite && <ZTNASiteHealthCard siteId={selectedSite.id}/>}
+    </>
+  );
+};
+
+// -------- Site health card shown below the picker --------
+const ZTNASiteHealthCard = ({ siteId }) => {
+  const store = window.useZtna();
+  const site = store.sites.find(s => s.id === siteId);
+  if (!site) return null;
+  const status = store.siteStatus(siteId);
+  const conns = store.siteConnectors(siteId);
+  const online = conns.filter(c => store.connectorStatus(c) === "online").length;
+  const offline = conns.filter(c => store.connectorStatus(c) === "offline").length;
+  const accent = status === "online" ? "var(--success-fg)" : status === "offline" || status === "not-enrolled" ? "var(--danger-fg)" : "var(--warning-fg)";
+
+  return (
+    <div style={{ marginTop: 10, border: `1px solid var(--border)`, borderLeft: `3px solid ${accent}`, borderRadius: "0 6px 6px 0", padding: 12, background: "#fff" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <span style={{ font: "600 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{site.name}</span>
+        <span style={{ padding: "1px 7px", background: "var(--bg-surface-2)", color: "var(--fg-3)", borderRadius: 4, font: "500 10.5px/1.4 var(--font-sans)" }}>{site.environment}</span>
+        <div style={{ flex: 1 }}/>
+        <ZTNAStatusBadge status={status} size="sm"/>
+      </div>
+      <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>
+        {conns.length} connector{conns.length === 1 ? "" : "s"} · <span style={{ color: "var(--success-fg)", fontWeight: 500 }}>{online} online</span>{offline > 0 && <>, <span style={{ color: "var(--danger-fg)", fontWeight: 500 }}>{offline} offline</span></>}
+      </div>
+      {status === "partial" && (
+        <div style={{ marginTop: 10, padding: 10, background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 4, font: "500 12px/1.5 var(--font-sans)" }}>
+          ⚠ {offline} of {conns.length} connectors are offline. Resource may be unreachable if online connector fails.
+          <div style={{ marginTop: 4 }}><a href="#" onClick={e => { e.preventDefault(); window.pamToast && window.pamToast("Troubleshoot arrives in Phase 3", "info"); }} style={{ color: "var(--warning-fg)", textDecoration: "underline", fontWeight: 600 }}>Fix →</a></div>
+        </div>
+      )}
+      {status === "offline" && (
+        <div style={{ marginTop: 10, padding: 10, background: "var(--danger-soft)", color: "var(--danger-fg)", borderRadius: 4, font: "500 12px/1.5 var(--font-sans)" }}>
+          ⚑ All connectors offline. Resource will be unreachable until at least one comes back online.
+        </div>
+      )}
+      {status === "not-enrolled" && (
+        <div style={{ marginTop: 10, padding: 10, background: "var(--danger-soft)", color: "var(--danger-fg)", borderRadius: 4, font: "500 12px/1.5 var(--font-sans)" }}>
+          ⚑ No connectors deployed in this site. Resource will be unreachable until a connector is added.
+          <div style={{ marginTop: 4 }}><a href="#" onClick={e => { e.preventDefault(); window.ztnaStore.openSetupExistingSite(siteId); }} style={{ color: "var(--danger-fg)", textDecoration: "underline", fontWeight: 600 }}>Add connector to {site.name} →</a></div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// =========================================================
+// NETWORK ROUTING SECTION — the block dropped into the resource wizard.
+// Usage: <ZTNANetworkRoutingSection ipHint={"10.42.18.7"} value={draft.routing} onChange={patch => set(...)}/>
+// =========================================================
+const ZTNA_PRIVATE_IP = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
+const ZTNANetworkRoutingSection = ({ ipHint, value, onChange }) => {
+  // Value shape: { method: "direct" | "ztna", siteId }
+  const v = value || { method: "direct", siteId: "" };
+  const isPrivate = ipHint && ZTNA_PRIVATE_IP.test(ipHint);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7 }}>Network routing</div>
+      <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>
+        If this resource is inside a private network, PAM needs a connector to reach it.
+      </div>
+
+      {isPrivate && v.method === "direct" && (
+        <div style={{ padding: 10, background: "var(--brand-soft)", color: "var(--brand-fg)", borderLeft: "3px solid var(--brand-fg)", borderRadius: "0 4px 4px 0", font: "500 12px/1.5 var(--font-sans)" }}>
+          Private IP detected — a ZTNA connector may be required to reach this resource.
+          <a href="#" onClick={e => { e.preventDefault(); window.ztnaStore.openConcept(); }} style={{ display: "inline-block", marginLeft: 6, color: "var(--brand-fg)", textDecoration: "underline" }}>What's a ZTNA connector?</a>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        {[
+          { v: "direct", label: "Direct",           hint: "PAM reaches resource without connector" },
+          { v: "ztna",   label: "Via ZTNA connector", hint: "PAM routes through a connector inside a private network" },
+        ].map(o => {
+          const sel = v.method === o.v;
+          return (
+            <button key={o.v} onClick={() => onChange({ ...v, method: o.v })} style={{
+              padding: 12, border: `1.5px solid ${sel ? "var(--brand-fg)" : "var(--border)"}`,
+              background: sel ? "var(--brand-soft)" : "#fff",
+              textAlign: "left", borderRadius: 6, cursor: "pointer",
+              display: "flex", flexDirection: "column", gap: 4,
+            }}>
+              <span style={{ font: `${sel ? 700 : 600} 13px/1 var(--font-sans)`, color: sel ? "var(--brand-fg)" : "var(--fg-1)" }}>{o.label}</span>
+              <span style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-3)" }}>{o.hint}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {v.method === "ztna" && (
+        <div style={{ marginTop: 4 }}>
+          <div style={{ font: "500 12px/1.4 var(--font-sans)", color: "var(--fg-2)", marginBottom: 6 }}>Which site is this resource behind?</div>
+          <ZTNASitePicker value={v.siteId} onChange={siteId => onChange({ ...v, siteId })}/>
+        </div>
+      )}
     </div>
   );
 };
 
 Object.assign(window, {
   ZTNAConnectorsPage,
+  ZTNAController,
   ZTNAConceptPanel,
   ZTNASiteDetailPanel,
   ZTNASiteCard,
@@ -616,4 +1328,10 @@ Object.assign(window, {
   ZTNADot,
   ZTNAEmptyState,
   ZTNAAlertBanner,
+  ZTNASetupFlow,
+  ZTNAStepIndicator,
+  ZTNACertRenewPanel,
+  ZTNASitePicker,
+  ZTNASiteHealthCard,
+  ZTNANetworkRoutingSection,
 });

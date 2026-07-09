@@ -222,6 +222,7 @@ const App = () => {
     </div>
     {tweaksUI}
     {portal === "admin" && window.BreakGlassController && React.createElement(window.BreakGlassController)}
+    {portal === "admin" && window.ZTNAController && React.createElement(window.ZTNAController)}
     {showAddPanel && <ResourceAddPanel
       onClose={(intent) => {
         setShowAddPanel(false);

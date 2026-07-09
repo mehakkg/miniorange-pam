@@ -768,6 +768,17 @@ const NewStep1RootCred = ({ data, setData }) => {
         </div>
       </div>
 
+      {/* Network routing — ZTNA site picker with private-IP auto-detect */}
+      <div>
+        {window.ZTNANetworkRoutingSection && (
+          <ZTNANetworkRoutingSection
+            ipHint={data.host}
+            value={data.routing}
+            onChange={(v) => patch("routing", v)}
+          />
+        )}
+      </div>
+
       <div>
         <div style={{ font: "600 11px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 12 }}>Root credential</div>
         <HelperCallout>
@@ -1279,6 +1290,8 @@ const NewManualAdd = ({ onClose, onCreated }) => {
     rotationPolicyId: "prod-daily",
     localAccountMode: "ephemeral",
     reconciliationAccountId: "backup-reconciliation-01",
+    // ZTNA routing (Surface E): { method: "direct" | "ztna", siteId }
+    routing: { method: "direct", siteId: "" },
   });
   // If the admin hasn't touched Step 2, keep the PAM-suggested picks in sync
   // with env/criticality. Once they touch Step 2, freeze — the admin has
