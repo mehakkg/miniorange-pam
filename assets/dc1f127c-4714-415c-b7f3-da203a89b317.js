@@ -42,7 +42,10 @@ const bgSoftStrong = "color-mix(in oklch, #7B3EA8 20%, transparent)";
     openTrigger: () => { store.open = "trigger"; store.emit(); },
     openMonitor: () => { store.open = "monitor"; store.emit(); },
     close: () => { store.open = null; store.emit(); },
-    grant: (session) => { store.active = { ...session, id: "BG-" + Math.floor(2050 + Math.random() * 900), grantedAt: Date.now() }; store.open = "monitor"; store.emit(); },
+    // grant() records the active session but does NOT auto-open the monitor.
+    // The caller controls what to show next (the trigger flow's "done" screen
+    // has its own "Monitor live session →" button that explicitly opens it).
+    grant: (session) => { store.active = { ...session, id: session.id || "BG-" + Math.floor(2050 + Math.random() * 900), grantedAt: session.grantedAt || Date.now() }; store.emit(); },
     extend: (hrs) => { if (store.active) { store.active.expiresHrs = (store.active.expiresHrs || 0) + hrs; store.active.extended = true; store.emit(); } },
     endSession: () => {
       if (!store.active) return;
@@ -80,187 +83,743 @@ const BGReviewStatus = ({ status }) => {
 };
 
 // =========================================================
-// TRIGGER MODAL — full-screen, multi-step emergency flow
+// TRIGGER FLOW — full-screen, no left nav, no X close button.
+// Five sequential screens: MFA step-up → emergency form → pre-grant
+// review (criticality-scaled confirmation) → grant progress checklist →
+// grant confirmed with inline audit entry (or grant failed).
+//
+// Deliberately breaks visual consistency with the rest of PAM. Darker
+// chrome, higher contrast, no navigation. The point is "you are not in
+// routine operation."
 // =========================================================
+
+// Reason categories, confirmed against standard incident management practice.
+const BG_REASON_CATEGORIES = [
+  "Production outage",
+  "Service degradation",
+  "Security incident",
+  "Data recovery",
+  "Compliance requirement",
+  "Vendor/third-party requirement",
+  "Other",
+];
+
+// Severity → max duration cap (hours). Enforced on the form.
+const BG_SEVERITY_MAX = { P1: 8, P2: 6, P3: 4 };
+
+// Persistent consequence banner sits under the dark chrome strip on Screens
+// 3–7. Red, non-dismissible. Same instance reused across screens so it reads
+// as one continuous warning, not a decoration.
+const BGConsequenceBanner = ({ children }) => (
+  <div style={{ padding: "10px 24px", background: "#FCEBEB", borderLeft: "3px solid #C0392B", color: "#7A1B12", font: "500 12.5px/1.5 var(--font-sans)" }}>
+    ⚡ {children}
+  </div>
+);
+
+// Dark chrome header strip — near-black bar with the current screen's title.
+const BGChromeHeader = ({ title }) => (
+  <div style={{ padding: "14px 24px", background: "#1A1916", color: "#fff", display: "flex", alignItems: "center", gap: 10, borderBottom: `1px solid ${BG}` }}>
+    <span style={{ fontSize: 18 }}>⚡</span>
+    <span style={{ font: "700 15px/1.2 var(--font-sans)", letterSpacing: 0.2 }}>{title}</span>
+  </div>
+);
+
+// Screen 5 confirmation mechanism, scaled by resource criticality:
+//   critical → typed confirmation (must match resource display name)
+//   high     → checkbox
+//   medium / low → nothing (button alone is enough)
+// Returns { ready, node } — parent uses `ready` to enable the primary CTA.
+const useBGConfirmation = (resource) => {
+  const crit = (resource?.criticality || "medium").toLowerCase();
+  const [typed, setTyped] = React.useState("");
+  const [checked, setChecked] = React.useState(false);
+  if (crit === "critical") {
+    const ready = typed.trim().toLowerCase() === (resource?.name || "").toLowerCase();
+    return {
+      ready,
+      node: (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ font: "500 12.5px/1.4 var(--font-sans)", color: "var(--fg-2)" }}>
+            To confirm, type the resource name below:
+          </div>
+          <input className="input t-mono" autoFocus value={typed} onChange={e => setTyped(e.target.value)} placeholder={resource?.name}/>
+          <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "#7A1B12" }}>
+            A secondary admin will be notified in real time. They cannot block the grant.
+          </div>
+        </div>
+      ),
+    };
+  }
+  if (crit === "high") {
+    return {
+      ready: checked,
+      node: (
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: 10, border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-app)", cursor: "pointer" }}>
+          <input type="checkbox" checked={checked} onChange={e => setChecked(e.target.checked)} style={{ marginTop: 2, accentColor: BG }}/>
+          <span style={{ font: "500 12.5px/1.4 var(--font-sans)", color: "var(--fg-1)" }}>
+            I confirm I am granting emergency access to <strong>{resource?.name}</strong>.
+          </span>
+        </label>
+      ),
+    };
+  }
+  return { ready: true, node: null };
+};
+
 const BGTriggerModal = () => {
   const cfg = window.bgStore.config;
-  const [step, setStep] = React.useState(1); // 1 resource+severity, 2 recipient, 3 justify, 4 mfa, 5 granted
-  const [resource, setResource] = React.useState(null);
-  const [severity, setSeverity] = React.useState("P1");
-  const [recipient, setRecipient] = React.useState(null);
-  const [just, setJust] = React.useState("");
+  // Screen order matches the spec exactly:
+  //   "mfa"      — MFA step-up (must complete before the form appears)
+  //   "form"     — Emergency access form
+  //   "review"   — Pre-grant review with criticality-scaled confirmation
+  //   "progress" — Grant in progress checklist
+  //   "done"     — Grant confirmed with inline audit entry
+  //   "failed"   — Grant failed state
+  const [screen, setScreen] = React.useState("mfa");
+
+  // MFA step-up state
+  const [mfaCode, setMfaCode] = React.useState("");
+  const [mfaAttempts, setMfaAttempts] = React.useState(3);
+  const [mfaError, setMfaError] = React.useState(null);
+  const [mfaVerifying, setMfaVerifying] = React.useState(false);
+
+  // Form state
+  const [severity, setSeverity] = React.useState(null);
   const [ticket, setTicket] = React.useState("");
+  const [recipient, setRecipient] = React.useState(null);
+  const [resource, setResource] = React.useState(null);
+  const [credential, setCredential] = React.useState(null);
+  const [reason, setReason] = React.useState("");
+  const [description, setDescription] = React.useState("");
+  const [message, setMessage] = React.useState("");
   const [duration, setDuration] = React.useState(cfg.defaultHrs);
-  const [resQ, setResQ] = React.useState("");
-  const [recQ, setRecQ] = React.useState("");
-  const [mfaState, setMfaState] = React.useState("idle"); // idle | verifying | done
 
-  const resources = (window.SEED_RESOURCES || [{ name: "ledger-mongo-cluster", host: "10.0.4.12", env: "production", type: "database" }, { name: "auth-server-01", host: "10.0.1.4", env: "production", type: "server" }, { name: "oracle-reporting", host: "10.0.1.89", env: "production", type: "database" }, { name: "k8s-control-plane-aws", host: "10.42.51.4", env: "production", type: "server" }]);
-  const people = ["Rohan Mehta", "Priya Iyer", "Marcus Chen", "Aditya Kulkarni", "Olivia Brookes"];
-  const cred = resource ? (resource.name.includes("mongo") ? "ledger-mongo-admin" : resource.name.includes("oracle") ? "oracle-dba-01" : resource.name.includes("auth") ? "linux-ssh-admin" : "k8s-cluster-admin") : "";
+  // Grant-in-progress checklist state (each entry: "pending" | "done")
+  const [progressSteps, setProgressSteps] = React.useState({});
+  const [grantedRecord, setGrantedRecord] = React.useState(null);
+  const [failReason, setFailReason] = React.useState(null);
 
-  const close = () => window.bgStore.close();
-  const justOk = !cfg.requireJustification || just.trim().length >= cfg.minChars;
-  const ticketOk = !cfg.requireTicket || ticket.trim().length > 0;
+  const cancel = () => window.bgStore.close();
 
-  const startMfa = () => { setMfaState("verifying"); setTimeout(() => setMfaState("done"), 1700); };
-  const grant = () => {
-    window.bgStore.grant({ recipient, resource: resource.name, resourceHost: resource.host, severity, justification: just, ticket: ticket || "—", durationHrs: duration, expiresHrs: duration, credential: cred, initiator: "Arjun Bansal", commands: 0 });
-    window.pamToast(`Break-glass granted — ${recipient} → ${resource.name}`, "info");
+  // People + resource catalogs — richer than the previous minimal seed so the
+  // form's UX reads as realistic. Resource criticality drives the pre-grant
+  // confirmation tier.
+  const people = [
+    { id: "u-rohan",  name: "Rohan Mehta",     role: "Operator",       email: "rohan.mehta@northwind.com",  lastLogin: "2 hours ago" },
+    { id: "u-priya",  name: "Priya Iyer",      role: "Operator",       email: "priya.iyer@northwind.com",   lastLogin: "42 min ago" },
+    { id: "u-marcus", name: "Marcus Chen",     role: "Operator",       email: "marcus.chen@northwind.com",  lastLogin: "yesterday" },
+    { id: "u-aditya", name: "Aditya Kulkarni", role: "End User",       email: "aditya.k@northwind.com",     lastLogin: "3 days ago" },
+    { id: "u-olivia", name: "Olivia Brookes",  role: "Operator",       email: "olivia.b@northwind.com",     lastLogin: "12 min ago" },
+  ];
+  const resources = [
+    { name: "prod-db-primary",       host: "10.42.18.7:5432",  env: "production",  type: "database", criticality: "critical", activeSessions: 2, lastBG: "14 days ago · P2 · Arjun Bansal · Reviewed" },
+    { name: "auth-server-01",         host: "auth01.kestrel.internal:22", env: "production", type: "server", criticality: "critical", activeSessions: 0, lastBG: "May 03 · P1 · Escalated" },
+    { name: "ledger-mongo-cluster",   host: "10.42.18.22:27017", env: "production", type: "database", criticality: "high", activeSessions: 1, lastBG: "May 14 · P1 · Reviewed" },
+    { name: "k8s-control-plane-aws",  host: "eks.us-east-1:443", env: "production", type: "cloud",   criticality: "critical", activeSessions: 0, lastBG: "Never" },
+    { name: "data-warehouse-bastion", host: "10.42.99.4:22", env: "production", type: "server", criticality: "high", activeSessions: 0, lastBG: "Never" },
+    { name: "oracle-reporting",       host: "10.0.1.89:1521", env: "production", type: "database", criticality: "high", activeSessions: 0, lastBG: "May 11 · P2 · Reviewed" },
+  ];
+  const credentialsFor = (r) => {
+    if (!r) return [];
+    if (r.type === "database" && r.name.includes("mongo")) return ["ledger-mongo-admin", "mongo-read"];
+    if (r.type === "database") return ["root-primary", "dba-read", "backup-admin"];
+    if (r.type === "server")   return ["root-primary", "linux-ssh-admin", "backup-agent"];
+    if (r.type === "cloud")    return ["eks-admin-token", "eks-viewer"];
+    return ["root-primary"];
   };
 
-  return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(15,10,25,0.78)", backdropFilter: "blur(3px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
-      <div style={{ width: 720, maxWidth: "96vw", maxHeight: "92vh", display: "flex", flexDirection: "column", background: "var(--bg-app)", borderRadius: 14, border: `1px solid ${BG}`, boxShadow: `0 24px 80px rgba(0,0,0,0.5), 0 0 0 1px ${bgSoft}`, overflow: "hidden" }}>
-        {/* Header */}
-        <div style={{ padding: "18px 24px", background: BG, color: "#fff", display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ width: 38, height: 38, borderRadius: 9, background: "rgba(255,255,255,0.16)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none", fontSize: 20 }}>⚡</div>
-          <div style={{ flex: 1 }}>
-            <div style={{ font: "700 17px/1.2 var(--font-sans)" }}>Declare Break-Glass Emergency</div>
-            <div style={{ font: "400 12px/1.4 var(--font-sans)", opacity: 0.85, marginTop: 2 }}>Emergency access bypasses normal approval. Every session is recorded, time-limited, and post-reviewed.</div>
-          </div>
-          {step < 5 && <button onClick={close} style={{ background: "rgba(255,255,255,0.16)", border: "none", color: "#fff", width: 30, height: 30, borderRadius: 7, cursor: "pointer", fontSize: 15 }}>✕</button>}
-        </div>
+  // Duration cap enforced from severity.
+  const durationMax = severity ? BG_SEVERITY_MAX[severity] : cfg.defaultHrs;
+  React.useEffect(() => {
+    if (severity && duration > BG_SEVERITY_MAX[severity]) setDuration(BG_SEVERITY_MAX[severity]);
+  }, [severity]);
 
-        {/* Step indicator */}
-        {step < 5 && (
-          <div style={{ display: "flex", alignItems: "center", padding: "12px 24px", gap: 8, borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-surface)" }}>
-            {["Resource", "Recipient", "Justification", "Verify"].map((s, i) => {
-              const done = step > i + 1, active = step === i + 1;
-              return <React.Fragment key={s}>
-                <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                  <div style={{ width: 20, height: 20, borderRadius: "50%", background: done ? BG : active ? bgSoftStrong : "var(--bg-surface-2)", color: done ? "#fff" : active ? BG : "var(--fg-4)", display: "flex", alignItems: "center", justifyContent: "center", font: "600 10.5px/1 var(--font-sans)", border: active ? `1px solid ${BG}` : "none" }}>{done ? "✓" : i + 1}</div>
-                  <span style={{ font: `${active ? 600 : 500} 12px/1 var(--font-sans)`, color: active ? "var(--fg-1)" : "var(--fg-4)" }}>{s}</span>
-                </div>
-                {i < 3 && <div style={{ flex: 1, height: 1, background: done ? BG : "var(--border)", maxWidth: 40 }}/>}
-              </React.Fragment>;
-            })}
-          </div>
-        )}
+  // Compute the expiry timestamp shown live under the duration input.
+  const expiryLabel = React.useMemo(() => {
+    const now = new Date();
+    now.setHours(now.getHours() + (parseInt(duration) || 0));
+    return now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+  }, [duration]);
 
-        <div className="scroll-area" style={{ flex: 1, overflow: "auto", padding: 24 }}>
-          {/* STEP 1 — Resource + severity */}
-          {step === 1 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-              <Field label="Which resource needs emergency access?" required>
-                <input className="input" autoFocus value={resQ} onChange={e => setResQ(e.target.value)} placeholder="Search critical resources…"/>
-                <div style={{ marginTop: 8, border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", maxHeight: 220, overflowY: "auto" }}>
-                  {resources.filter(r => r.name.toLowerCase().includes(resQ.toLowerCase())).map(r => (
-                    <button key={r.name} onClick={() => setResource(r)} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "10px 12px", border: "none", borderBottom: "1px solid var(--border-subtle)", background: resource?.name === r.name ? bgSoft : "transparent", cursor: "pointer", textAlign: "left" }}>
-                      <Icon name={r.type === "database" ? "database" : "server"} size={14} color="var(--fg-3)"/>
-                      <div style={{ flex: 1 }}>
-                        <div className="t-mono" style={{ fontSize: 12.5, fontWeight: 500, color: "var(--fg-1)" }}>{r.name}</div>
-                        <div className="t-tiny" style={{ color: "var(--fg-4)" }}>{r.host} · {r.env}</div>
-                      </div>
-                      {resource?.name === r.name && <Icon name="check" size={14} color={BG}/>}
-                    </button>
-                  ))}
-                </div>
-              </Field>
-              <Field label="Emergency severity" required>
-                <div style={{ display: "flex", gap: 8 }}>
-                  {[["P1", "P1 Critical", "var(--danger-fg)"], ["P2", "P2 High", "var(--warning-fg)"], ["P3", "P3 Medium", "var(--brand-fg)"]].map(([v, l, c]) => (
-                    <button key={v} onClick={() => setSeverity(v)} style={{ flex: 1, padding: "10px 12px", borderRadius: 8, border: `1px solid ${severity === v ? c : "var(--border)"}`, background: severity === v ? `color-mix(in oklch, ${c} 12%, transparent)` : "var(--bg-surface)", color: severity === v ? c : "var(--fg-2)", font: `${severity === v ? 600 : 500} 13px/1.3 var(--font-sans)`, cursor: "pointer" }}>{l}</button>
-                  ))}
-                </div>
-              </Field>
+  // Existing-access check for the recipient (mock — looks fabricated).
+  const recipientHasAccess = recipient && resource && recipient.name === "Rohan Mehta" && resource.name === "prod-db-primary";
+
+  const formValid = severity && recipient && resource && credential && reason && description.trim().length >= cfg.minChars;
+
+  // ── MFA step-up ────────────────────────────────────────────────
+  // Auto-submit when all 6 digits are entered. Runs from state, not from
+  // a click handler, so it always sees the fresh code rather than a stale
+  // closure captured at input time.
+  const submitMfaCode = (code) => {
+    setMfaVerifying(true);
+    setTimeout(() => {
+      setMfaVerifying(false);
+      // Any 6-digit code except literal "000000" verifies — 000000 exercises the failure path.
+      if (code === "000000") {
+        setMfaAttempts(a => {
+          const left = a - 1;
+          setMfaError(left > 0 ? `Incorrect code. ${left} attempt${left === 1 ? "" : "s"} remaining.` : "Locked out. Contact another admin to declare emergency access.");
+          return left;
+        });
+        setMfaCode("");
+      } else {
+        setScreen("form");
+        setMfaCode("");
+        setMfaError(null);
+      }
+    }, 800);
+  };
+  React.useEffect(() => {
+    if (screen === "mfa" && mfaCode.length === 6 && !mfaVerifying) submitMfaCode(mfaCode);
+  }, [mfaCode, screen]);
+
+  // ── Pre-grant review confirmation ──────────────────────────────
+  const confirmation = useBGConfirmation(resource);
+
+  // ── Grant flow ─────────────────────────────────────────────────
+  const runGrant = () => {
+    setScreen("progress");
+    setProgressSteps({});
+    const steps = ["auth", "bundle", "grant", "notify", "record", "audit"];
+    steps.forEach((s, i) => setTimeout(() => setProgressSteps(prev => ({ ...prev, [s]: "done" })), 250 + i * 300));
+    setTimeout(() => {
+      // Deterministic simulated failure path: recipient="Aditya Kulkarni" fails.
+      // Everything else succeeds.
+      if (recipient?.name === "Aditya Kulkarni") {
+        setFailReason("Recipient account is not in the eligible roles list for break-glass on this resource. Configuration review required.");
+        setScreen("failed");
+        return;
+      }
+      const record = {
+        id: "BG-" + Math.floor(2050 + Math.random() * 900),
+        recipient: recipient.name,
+        recipientRole: recipient.role,
+        resource: resource.name,
+        resourceHost: resource.host,
+        resourceType: resource.type,
+        severity,
+        credential,
+        justification: description,
+        reason,
+        ticket: ticket || "—",
+        message,
+        durationHrs: duration,
+        expiresHrs: duration,
+        initiator: "Arjun Bansal",
+        commands: 0,
+        grantedAt: Date.now(),
+      };
+      window.bgStore.grant(record);
+      setGrantedRecord({ ...record, id: window.bgStore.active?.id });
+      setScreen("done");
+    }, 250 + steps.length * 300 + 200);
+  };
+
+  // ── Full-screen shell (same chrome across every screen) ────────
+  const Shell = ({ title, children, banner }) => (
+    <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "#fff", display: "flex", flexDirection: "column" }}>
+      <BGChromeHeader title={title}/>
+      {banner !== null && <BGConsequenceBanner>{banner || "All actions on this screen are permanently logged. This grant cannot be undone — only revoked."}</BGConsequenceBanner>}
+      <div className="scroll-area" style={{ flex: 1, overflow: "auto" }}>{children}</div>
+    </div>
+  );
+
+  // ── Screen 3 · MFA step-up ─────────────────────────────────────
+  if (screen === "mfa") {
+    return (
+      <Shell title="Emergency Access — Identity Verification Required" banner="This session will be recorded, time-limited, and subject to mandatory post-incident review.">
+        <div style={{ maxWidth: 480, margin: "60px auto 0", padding: "0 24px", display: "flex", flexDirection: "column", gap: 20 }}>
+          <div>
+            <h1 style={{ font: "700 22px/1.2 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Verify your identity to continue</h1>
+            <p style={{ font: "400 13px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "6px 0 0" }}>Break-glass access is irreversible once granted. We need to confirm it's you.</p>
+          </div>
+
+          <div>
+            <div style={{ font: "600 12px/1.3 var(--font-sans)", color: "var(--fg-2)", marginBottom: 10 }}>Enter the 6-digit code from your authenticator app</div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+              {[0,1,2,3,4,5].map(i => (
+                <input
+                  key={i}
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={1}
+                  value={mfaCode[i] || ""}
+                  onChange={e => {
+                    const v = e.target.value.replace(/\D/g, "").slice(0, 1);
+                    const parent = e.target.parentElement;
+                    setMfaCode(prev => (prev.slice(0, i) + v + prev.slice(i + 1)).slice(0, 6));
+                    if (v && i < 5) parent.children[i + 1]?.focus();
+                  }}
+                  style={{
+                    width: 48, height: 56, textAlign: "center",
+                    font: "600 22px/1 var(--font-mono)",
+                    border: `1px solid ${mfaError ? "var(--danger-fg)" : "var(--border)"}`,
+                    borderRadius: 6, background: mfaVerifying ? "var(--bg-surface-2)" : "#fff",
+                    color: "var(--fg-1)", outline: "none",
+                  }}
+                  disabled={mfaVerifying || mfaAttempts === 0}
+                />
+              ))}
             </div>
-          )}
+            {mfaError && (
+              <div style={{ marginTop: 12, padding: "10px 12px", background: "#FCEBEB", color: "#7A1B12", borderRadius: 4, font: "500 12.5px/1.4 var(--font-sans)" }}>
+                ⚠ {mfaError}
+              </div>
+            )}
+            {mfaVerifying && !mfaError && (
+              <div style={{ marginTop: 12, textAlign: "center", font: "500 12px/1.4 var(--font-sans)", color: BG }}>
+                <Spinner size={12}/> Verifying…
+              </div>
+            )}
+            <div style={{ marginTop: 16, textAlign: "center" }}>
+              <a href="#" onClick={e => e.preventDefault()} style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-3)", textDecoration: "underline" }}>Having trouble? Use backup code</a>
+            </div>
+          </div>
 
-          {/* STEP 2 — Recipient */}
-          {step === 2 && (
-            <Field label="Who needs the access?" required hint="Select the engineer who will use this emergency access.">
-              <input className="input" autoFocus value={recQ} onChange={e => setRecQ(e.target.value)} placeholder="Search users…"/>
-              <div style={{ marginTop: 8, border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", maxHeight: 280, overflowY: "auto" }}>
-                {people.filter(p => p.toLowerCase().includes(recQ.toLowerCase())).map(p => (
-                  <button key={p} onClick={() => setRecipient(p)} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "10px 12px", border: "none", borderBottom: "1px solid var(--border-subtle)", background: recipient === p ? bgSoft : "transparent", cursor: "pointer", textAlign: "left" }}>
-                    <Avatar name={p} size={28}/>
-                    <span style={{ flex: 1, font: "500 13px/1 var(--font-sans)", color: "var(--fg-1)" }}>{p}</span>
-                    {recipient === p && <Icon name="check" size={14} color={BG}/>}
+          <div style={{ textAlign: "center", marginTop: 8 }}>
+            <a href="#" onClick={e => { e.preventDefault(); cancel(); }} style={{ font: "500 12.5px/1 var(--font-sans)", color: "var(--fg-4)" }}>
+              Cancel emergency access
+            </a>
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  // ── Screen 4 · Emergency access form ───────────────────────────
+  if (screen === "form") {
+    return (
+      <Shell title="Emergency Access — Break-Glass Initiation">
+        <div style={{ maxWidth: 640, margin: "24px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 24 }}>
+
+          {/* SECTION: Emergency context */}
+          <section>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>Emergency context</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 14 }}>
+              {[
+                { v: "P1", label: "P1 — CRITICAL", sub: "System down · Revenue impact · Customer-facing failure", color: "#C0392B", icon: "alert-triangle" },
+                { v: "P2", label: "P2 — HIGH",     sub: "Degraded performance · Security incident · Potential impact", color: "#B45309", icon: "alert-circle" },
+                { v: "P3", label: "P3 — MEDIUM",   sub: "Internal issue · No direct customer impact", color: "var(--info-fg)", icon: "info" },
+              ].map(s => {
+                const sel = severity === s.v;
+                return (
+                  <button key={s.v} onClick={() => setSeverity(s.v)} style={{
+                    padding: 14, border: `1.5px solid ${sel ? s.color : "var(--border)"}`,
+                    background: sel ? `color-mix(in oklch, ${s.color} 8%, transparent)` : "#fff",
+                    borderRadius: 8, cursor: "pointer", textAlign: "left",
+                    display: "flex", flexDirection: "column", gap: 6,
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <Icon name={s.icon} size={14} color={sel ? s.color : "var(--fg-4)"}/>
+                      <span style={{ font: "700 12px/1 var(--font-sans)", color: sel ? s.color : "var(--fg-1)", letterSpacing: 0.4 }}>{s.label}</span>
+                    </div>
+                    <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-3)" }}>{s.sub}</div>
+                    <div style={{ marginTop: "auto", font: "500 10.5px/1 var(--font-sans)", color: "var(--fg-4)" }}>Max {BG_SEVERITY_MAX[s.v]}h</div>
                   </button>
-                ))}
-              </div>
-            </Field>
-          )}
+                );
+              })}
+            </div>
 
-          {/* STEP 3 — Justification */}
-          {step === 3 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-              <Field label="Emergency justification" required hint={`Minimum ${cfg.minChars} characters. This is permanently recorded and reviewed.`}>
-                <textarea className="input" autoFocus rows={4} value={just} onChange={e => setJust(e.target.value)} placeholder="Describe the emergency and why normal approval cannot be used…"/>
-                <div style={{ marginTop: 4, font: "400 11.5px/1 var(--font-sans)", color: just.length >= cfg.minChars ? "var(--success-fg)" : "var(--fg-4)" }}>{just.length} / {cfg.minChars} characters</div>
-              </Field>
-              {cfg.requireTicket && (
-                <Field label={cfg.ticketLabel} required>
-                  <input className="input" value={ticket} onChange={e => setTicket(e.target.value)} placeholder="e.g. PD-8841"/>
-                </Field>
+            <Field label={cfg.ticketLabel || "PagerDuty incident #"} hint="Reference number from your incident management system">
+              <input className="input" value={ticket} onChange={e => setTicket(e.target.value)} placeholder="e.g. PD-4821"/>
+              {ticket && (
+                <div style={{ marginTop: 6, padding: "6px 10px", background: "var(--success-soft)", color: "var(--success-fg)", borderRadius: 4, font: "500 11.5px/1.4 var(--font-sans)", display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  ✓ Ticket found: DB connectivity issue — P2
+                </div>
               )}
-              <Field label="Access duration" hint={`Default ${cfg.defaultHrs}h · maximum ${cfg.maxHrs}h.`}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <input className="input" type="number" min={1} max={cfg.maxHrs} value={duration} onChange={e => setDuration(Math.min(cfg.maxHrs, +e.target.value))} style={{ width: 100 }}/>
-                  <span style={{ font: "400 13px/1 var(--font-sans)", color: "var(--fg-3)" }}>hours</span>
+            </Field>
+          </section>
+
+          {/* SECTION: Recipient */}
+          <section>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>Recipient</div>
+            <Field label="Who needs access?" required hint="One recipient at a time — break-glass is never bulk.">
+              <select className="input" value={recipient?.id || ""} onChange={e => setRecipient(people.find(p => p.id === e.target.value))}>
+                <option value="">Search users…</option>
+                {people.map(p => <option key={p.id} value={p.id}>{p.name} · {p.role} · {p.email}</option>)}
+              </select>
+            </Field>
+            {recipient && (
+              <div style={{ marginTop: 10, padding: 12, border: "1px solid var(--border)", borderRadius: 6, display: "flex", alignItems: "center", gap: 10 }}>
+                <Avatar name={recipient.name} size={32}/>
+                <div style={{ flex: 1 }}>
+                  <div style={{ font: "600 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{recipient.name} · {recipient.role}</div>
+                  <div className="t-tiny" style={{ color: "var(--fg-3)", marginTop: 2 }}>{recipient.email} · Last login: {recipient.lastLogin}</div>
+                </div>
+              </div>
+            )}
+            {recipientHasAccess && (
+              <div style={{ marginTop: 10, padding: 12, background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 6, font: "500 12.5px/1.5 var(--font-sans)" }}>
+                ⚠ {recipient.name} already has active access to {resource?.name} (ends May 18, 8:00 AM). Verify break-glass is genuinely needed.
+              </div>
+            )}
+          </section>
+
+          {/* SECTION: Target resource */}
+          <section>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>Target resource</div>
+            <div className="card" style={{ overflow: "hidden" }}>
+              <table className="table">
+                <thead><tr>
+                  <th>Resource</th>
+                  <th>Type</th>
+                  <th>Criticality</th>
+                  <th>Active</th>
+                  <th></th>
+                </tr></thead>
+                <tbody>{resources.map(r => (
+                  <tr key={r.name} onClick={() => { setResource(r); setCredential(credentialsFor(r)[0]); }} style={{ cursor: "pointer", background: resource?.name === r.name ? bgSoft : undefined }}>
+                    <td><span className="t-mono" style={{ font: "500 12.5px/1.3 var(--font-sans)", color: BG }}>{r.name}</span></td>
+                    <td><span className="badge">{r.type}</span></td>
+                    <td><span style={{ font: "500 12px/1 var(--font-sans)", color: r.criticality === "critical" ? "var(--danger-fg)" : "var(--warning-fg)", textTransform: "capitalize" }}>{r.criticality}</span></td>
+                    <td className="t-tiny" style={{ color: r.activeSessions > 0 ? "var(--success-fg)" : "var(--fg-4)" }}>{r.activeSessions} session{r.activeSessions === 1 ? "" : "s"}</td>
+                    <td style={{ textAlign: "right" }}>{resource?.name === r.name && <Icon name="check" size={13} color={BG}/>}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+            {resource && (
+              <div style={{ marginTop: 12, padding: 14, borderLeft: `3px solid ${BG}`, background: bgSoft, borderRadius: "0 6px 6px 0" }}>
+                <div style={{ font: "700 13.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>⚡ {resource.name}</div>
+                <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>
+                  {resource.type} · {resource.host} · Environment: {resource.env} · Criticality: {resource.criticality}
+                </div>
+                <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 2 }}>
+                  Last break-glass: {resource.lastBG}
+                </div>
+                <div style={{ marginTop: 10 }}>
+                  <Field label="Credential to use" required>
+                    <select className="input" value={credential || ""} onChange={e => setCredential(e.target.value)}>
+                      {credentialsFor(resource).map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </Field>
+                  {credential === "root-primary" && (
+                    <div style={{ marginTop: 6, font: "400 11.5px/1.4 var(--font-sans)", color: "var(--warning-fg)" }}>
+                      ⚠ root-primary is the highest privilege account. Consider a scoped credential if sufficient for this incident.
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+
+          {/* SECTION: Access scope */}
+          <section>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>Access scope</div>
+            <Field label="Access window" required>
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <input className="input" type="number" min={1} max={durationMax} value={duration} onChange={e => setDuration(Math.min(durationMax, Math.max(1, +e.target.value)))} style={{ width: 90 }}/>
+                <span style={{ font: "400 13px/1 var(--font-sans)", color: "var(--fg-3)" }}>hours</span>
+                <span style={{ marginLeft: "auto", font: "600 15px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>
+                  Expires at {expiryLabel}
+                </span>
+              </div>
+              {severity && (
+                <div style={{ marginTop: 6, font: "500 11.5px/1.4 var(--font-sans)", color: duration > BG_SEVERITY_MAX[severity] ? "var(--danger-fg)" : "var(--fg-4)" }}>
+                  Max for {severity}: {BG_SEVERITY_MAX[severity]} hours
+                </div>
+              )}
+            </Field>
+            {cfg.extensionAllowed && (
+              <div style={{ marginTop: 8, font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>
+                {cfg.maxExtensions} extension allowed — up to 4 additional hours
+              </div>
+            )}
+          </section>
+
+          {/* SECTION: Justification */}
+          <section>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>Justification</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <Field label="Reason category" required>
+                <select className="input" value={reason} onChange={e => setReason(e.target.value)}>
+                  <option value="">Select reason…</option>
+                  {BG_REASON_CATEGORIES.map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+              </Field>
+              <Field label="Emergency description" required>
+                <textarea className="input" rows={4} value={description} onChange={e => setDescription(e.target.value)} placeholder="Describe what happened, when, the business impact, and why normal access workflows cannot be used right now."/>
+                <div style={{ marginTop: 4, font: "400 11.5px/1 var(--font-sans)", color: description.length >= cfg.minChars ? "var(--success-fg)" : "var(--fg-4)" }}>
+                  {description.length} / {cfg.minChars} minimum
                 </div>
               </Field>
+              <Field label="Message to recipient (optional)" hint="This appears in the recipient's notification.">
+                <textarea className="input" rows={2} value={message} onChange={e => setMessage(e.target.value)} placeholder="e.g. 4 hours of emergency access. Document all commands in the post-incident review. Call me at +91-XXXXX for extension."/>
+              </Field>
             </div>
-          )}
+          </section>
 
-          {/* STEP 4 — MFA re-verify */}
-          {step === 4 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-              <div style={{ padding: 14, background: bgSoft, borderRadius: 8, borderLeft: `3px solid ${BG}` }}>
-                <div style={{ font: "600 13px/1.3 var(--font-sans)", color: "var(--fg-1)", marginBottom: 8 }}>Confirm the emergency grant</div>
-                <div style={{ display: "grid", gridTemplateColumns: "130px 1fr", gap: 7, font: "400 12.5px/1.5 var(--font-sans)" }}>
-                  <span style={{ color: "var(--fg-4)" }}>Recipient</span><span style={{ color: "var(--fg-1)", fontWeight: 500 }}>{recipient}</span>
-                  <span style={{ color: "var(--fg-4)" }}>Resource</span><span className="t-mono" style={{ color: "var(--fg-1)" }}>{resource?.name}</span>
-                  <span style={{ color: "var(--fg-4)" }}>Severity</span><span><SeverityBadge level={severity}/></span>
-                  <span style={{ color: "var(--fg-4)" }}>Credential</span><span className="t-mono" style={{ color: "var(--fg-1)" }}>{cred}</span>
-                  <span style={{ color: "var(--fg-4)" }}>Duration</span><span style={{ color: "var(--fg-1)" }}>{duration} hours</span>
+          {/* SECTION: Notifications preview */}
+          <section>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>Notifications preview</div>
+            <div className="card" style={{ padding: 12 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, font: "400 12.5px/1.4 var(--font-sans)", color: "var(--fg-2)" }}>
+                  <Avatar name="Aria Chen" size={22}/>
+                  <span style={{ flex: 1 }}>Aria Chen — Security Admin Lead</span>
+                  <span className="t-tiny" style={{ color: "var(--fg-4)" }}>Email + In-app</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, font: "400 12.5px/1.4 var(--font-sans)", color: "var(--fg-2)" }}>
+                  <div style={{ width: 22, height: 22, borderRadius: "50%", background: "var(--brand-soft)", color: "var(--brand-fg)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
+                    <Icon name="people" size={11}/>
+                  </div>
+                  <span style={{ flex: 1 }}>Security Team</span>
+                  <span className="t-tiny" style={{ color: "var(--fg-4)" }}>Email</span>
                 </div>
               </div>
-              <div style={{ padding: 16, border: "1px solid var(--border)", borderRadius: 10, textAlign: "center" }}>
-                <div style={{ font: "600 13.5px/1.3 var(--font-sans)", color: "var(--fg-1)", marginBottom: 4 }}>🔒 MFA re-verification required</div>
-                <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)", marginBottom: 14 }}>Break-glass requires hardware-key verification before access is granted. This cannot be skipped.</div>
-                {mfaState === "idle" && <button className="btn" style={{ background: BG, color: "#fff", borderColor: BG }} onClick={startMfa}><Icon name="key" size={13}/> Tap hardware key to verify</button>}
-                {mfaState === "verifying" && <div style={{ display: "inline-flex", alignItems: "center", gap: 8, font: "500 13px/1 var(--font-sans)", color: BG }}><Spinner size={14}/> Verifying hardware key…</div>}
-                {mfaState === "done" && <div style={{ display: "inline-flex", alignItems: "center", gap: 8, font: "600 13px/1 var(--font-sans)", color: "var(--success-fg)" }}>✓ MFA verified</div>}
+              <div style={{ marginTop: 8, font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>
+                2 people will be notified immediately when you submit.
               </div>
-              <div style={{ padding: 12, background: "var(--bg-surface-2)", borderRadius: 8, font: "400 11.5px/1.6 var(--font-sans)", color: "var(--fg-3)" }}>
-                On grant, the following are <strong style={{ color: "var(--fg-2)" }}>mandatory and automatic</strong>: session recording · keystroke logging · post-incident review · credential rotation within 24h of session end.
+            </div>
+          </section>
+
+          {/* CTA */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: 6 }}>
+            <button className="btn" disabled={!formValid} onClick={() => setScreen("review")} style={{ background: formValid ? BG : "var(--bg-surface-2)", color: formValid ? "#fff" : "var(--fg-4)", borderColor: "transparent", padding: "12px 20px", font: "700 13.5px/1 var(--font-sans)" }}>
+              Review and grant access →
+            </button>
+            <a href="#" onClick={e => { e.preventDefault(); cancel(); }} style={{ font: "500 12.5px/1 var(--font-sans)", color: "var(--fg-4)", textAlign: "center" }}>
+              Cancel emergency request
+            </a>
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  // ── Screen 5 · Pre-grant review ────────────────────────────────
+  if (screen === "review") {
+    return (
+      <Shell title="Emergency Access — Review Before Granting">
+        <div style={{ maxWidth: 640, margin: "24px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 16 }}>
+          <div>
+            <h1 style={{ font: "700 18px/1.3 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Review everything before committing.</h1>
+            <p style={{ font: "400 13px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "4px 0 0" }}>This cannot be undone — only revoked.</p>
+          </div>
+
+          <div className="card" style={{ padding: 20, border: `2px solid ${BG}` }}>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>Emergency summary</div>
+            <div style={{ display: "grid", gridTemplateColumns: "150px 1fr", rowGap: 8, columnGap: 14, font: "400 12.5px/1.5 var(--font-sans)" }}>
+              <span style={{ color: "var(--fg-4)" }}>Severity</span><span><SeverityBadge level={severity}/></span>
+              <span style={{ color: "var(--fg-4)" }}>Incident</span><span>{ticket || "—"} · {reason}</span>
+              <span style={{ color: "var(--fg-4)" }}>Initiated by</span><span>Arjun Bansal (Security Admin)</span>
+              <span style={{ color: "var(--fg-4)" }}>Recipient</span><span><strong style={{ color: "var(--fg-1)" }}>{recipient.name}</strong> ({recipient.role})</span>
+              <span style={{ color: "var(--fg-4)" }}>Resource</span><span className="t-mono">{resource.name} · {resource.type} · <span style={{ color: resource.criticality === "critical" ? "var(--danger-fg)" : "var(--warning-fg)", textTransform: "capitalize" }}>{resource.criticality}</span></span>
+              <span style={{ color: "var(--fg-4)" }}>Credential</span><span className="t-mono">{credential} <span style={{ color: "var(--fg-4)" }}>(non-viewable — injected by proxy)</span></span>
+              <span style={{ color: "var(--fg-4)" }}>Access window</span><span>{duration} hours (expires at {expiryLabel})</span>
+            </div>
+
+            <div style={{ marginTop: 16, padding: 12, background: "var(--success-soft)", borderRadius: 4 }}>
+              <div style={{ font: "600 11.5px/1 var(--font-sans)", color: "var(--success-fg)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 }}>Mandatory controls that will apply</div>
+              <div style={{ font: "400 12px/1.7 var(--font-sans)", color: "var(--success-fg)" }}>
+                ✓ MFA required when {recipient.name.split(" ")[0]} connects<br/>
+                ✓ Full session recording (video + keystrokes)<br/>
+                ✓ Post-incident review mandatory<br/>
+                ✓ {credential} will be rotated within 24h
               </div>
+            </div>
+
+            {description && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 4 }}>Justification</div>
+                <div style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-2)" }}>"{description.slice(0, 240)}{description.length > 240 ? "…" : ""}"</div>
+              </div>
+            )}
+          </div>
+
+          {/* Confirmation mechanism — scaled by criticality */}
+          {confirmation.node && (
+            <div style={{ padding: 14, border: `1px solid ${BG}`, borderRadius: 6, background: bgSoft }}>
+              {confirmation.node}
             </div>
           )}
 
-          {/* STEP 5 — Granted */}
-          {step === 5 && (
-            <div style={{ textAlign: "center", padding: "12px 0" }}>
-              <div style={{ width: 60, height: 60, borderRadius: "50%", background: bgSoft, color: BG, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 28, marginBottom: 12 }}>⚡</div>
-              <div style={{ font: "700 18px/1.2 var(--font-sans)", color: "var(--fg-1)", marginBottom: 6 }}>Break-glass access granted</div>
-              <div style={{ font: "400 13px/1.5 var(--font-sans)", color: "var(--fg-3)", maxWidth: 440, margin: "0 auto 18px" }}><strong style={{ color: "var(--fg-1)" }}>{recipient}</strong> now has emergency access to <span className="t-mono">{resource?.name}</span> for {duration} hours. The session is being recorded.</div>
-              <div className="card" style={{ padding: 14, textAlign: "left", maxWidth: 480, margin: "0 auto", background: "var(--bg-surface-2)" }}>
-                <div style={{ display: "grid", gridTemplateColumns: "130px 1fr", gap: 7, font: "400 12.5px/1.5 var(--font-sans)" }}>
-                  <span style={{ color: "var(--fg-4)" }}>Recording</span><span style={{ color: "var(--success-fg)" }}>● Active (mandatory)</span>
-                  <span style={{ color: "var(--fg-4)" }}>Post-review</span><span style={{ color: "var(--warning-fg)" }}>Required on session end</span>
-                  <span style={{ color: "var(--fg-4)" }}>Credential rotation</span><span style={{ color: "var(--fg-2)" }}>Scheduled within 24h of end</span>
-                </div>
-              </div>
-            </div>
-          )}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: 4 }}>
+            <button
+              className="btn"
+              disabled={!confirmation.ready}
+              onClick={runGrant}
+              style={{
+                background: confirmation.ready ? BG : "var(--bg-surface-2)",
+                color: confirmation.ready ? "#fff" : "var(--fg-4)",
+                borderColor: "transparent", padding: "14px 20px",
+                font: "700 14px/1 var(--font-sans)",
+              }}
+            >
+              ⚡ Grant emergency access
+            </button>
+            <a href="#" onClick={e => { e.preventDefault(); setScreen("form"); }} style={{ font: "500 12.5px/1 var(--font-sans)", color: "var(--fg-4)", textAlign: "center" }}>
+              ← Edit request
+            </a>
+          </div>
         </div>
+      </Shell>
+    );
+  }
 
-        {/* Footer */}
-        <div style={{ padding: "14px 24px", borderTop: "1px solid var(--border)", display: "flex", gap: 8, alignItems: "center", background: "var(--bg-surface)" }}>
-          {step < 5 && <button className="btn btn-ghost" onClick={close}>Cancel</button>}
-          <div style={{ flex: 1 }}/>
-          {step > 1 && step < 5 && <button className="btn" onClick={() => setStep(step - 1)}>← Back</button>}
-          {step === 1 && <button className="btn" style={{ background: BG, color: "#fff", borderColor: BG }} disabled={!resource} onClick={() => setStep(2)}>Next →</button>}
-          {step === 2 && <button className="btn" style={{ background: BG, color: "#fff", borderColor: BG }} disabled={!recipient} onClick={() => setStep(3)}>Next →</button>}
-          {step === 3 && <button className="btn" style={{ background: BG, color: "#fff", borderColor: BG }} disabled={!justOk || !ticketOk} onClick={() => setStep(4)}>Next →</button>}
-          {step === 4 && <button className="btn" style={{ background: BG, color: "#fff", borderColor: BG }} disabled={mfaState !== "done"} onClick={() => { grant(); setStep(5); }}>⚡ Grant emergency access</button>}
-          {step === 5 && <>
-            <button className="btn btn-ghost" onClick={close}>Close</button>
-            <button className="btn" style={{ background: BG, color: "#fff", borderColor: BG }} onClick={() => window.bgStore.openMonitor()}>Monitor session →</button>
-          </>}
+  // ── Screen 6a · Grant in progress ──────────────────────────────
+  if (screen === "progress") {
+    const steps = [
+      { id: "auth",   label: "Verifying authorization" },
+      { id: "bundle", label: "Generating emergency credential bundle" },
+      { id: "grant",  label: `Granting access to ${resource.name} for ${recipient.name}` },
+      { id: "notify", label: "Notifying security team" },
+      { id: "record", label: "Starting mandatory session recording" },
+      { id: "audit",  label: "Logging to audit trail" },
+    ];
+    return (
+      <Shell title="Emergency Access — Granting…">
+        <div style={{ maxWidth: 520, margin: "60px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 8 }}>
+          <h1 style={{ font: "700 18px/1.3 var(--font-sans)", color: "var(--fg-1)", margin: "0 0 14px" }}>Granting emergency access…</h1>
+          {steps.map(s => {
+            const st = progressSteps[s.id];
+            return (
+              <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", border: "1px solid var(--border-subtle)", borderRadius: 6 }}>
+                <span style={{ width: 18, display: "flex", justifyContent: "center" }}>
+                  {st === "done"
+                    ? <Icon name="check-circle" size={15} color="var(--success-fg)"/>
+                    : <Spinner size={13}/>}
+                </span>
+                <span style={{ flex: 1, font: `${st === "done" ? 500 : 400} 12.5px/1.4 var(--font-sans)`, color: st === "done" ? "var(--fg-1)" : "var(--fg-3)" }}>
+                  {s.label}
+                </span>
+                {st === "done" && <span className="t-tiny" style={{ color: "var(--fg-4)" }}>{new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>}
+              </div>
+            );
+          })}
         </div>
+      </Shell>
+    );
+  }
+
+  // ── Screen 6b · Grant confirmed ────────────────────────────────
+  if (screen === "done") {
+    const r = grantedRecord || { id: "BG-XXXX", recipient: recipient?.name, resource: resource?.name, credential };
+    return (
+      <Shell title={`Emergency Access — Granted (${r.id})`}>
+        <div style={{ maxWidth: 560, margin: "36px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ width: 72, height: 72, borderRadius: "50%", background: bgSoft, color: BG, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 32, marginBottom: 10 }}>
+              <Icon name="shield" size={30} color={BG}/>
+            </div>
+            <div style={{ font: "700 20px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>Emergency access granted</div>
+            <div style={{ font: "400 13px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "6px 0 0" }}>
+              {recipient?.name} has {duration} hour{duration === 1 ? "" : "s"} of emergency access to <span className="t-mono">{resource?.name}</span>.
+            </div>
+          </div>
+
+          <div className="card" style={{ padding: 16, border: `2px solid ${BG}` }}>
+            <div style={{ display: "grid", gridTemplateColumns: "150px 1fr", rowGap: 8, columnGap: 14, font: "400 12.5px/1.5 var(--font-sans)" }}>
+              <span style={{ color: "var(--fg-4)" }}>Recipient</span><span style={{ color: "var(--fg-1)", fontWeight: 500 }}>{recipient?.name}</span>
+              <span style={{ color: "var(--fg-4)" }}>Resource</span><span className="t-mono">{resource?.name}</span>
+              <span style={{ color: "var(--fg-4)" }}>Credential</span><span className="t-mono">{credential} <span style={{ color: "var(--fg-4)" }}>(non-viewable)</span></span>
+              <span style={{ color: "var(--fg-4)" }}>Access active from</span><span>{new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}</span>
+              <span style={{ color: "var(--fg-4)" }}>Access expires</span><span>{expiryLabel} <span style={{ color: "var(--fg-4)" }}>({duration}h)</span></span>
+              <span style={{ color: "var(--fg-4)" }}>Recording</span><span style={{ color: "var(--success-fg)", font: "500 12.5px/1.4 var(--font-sans)" }}>● Active</span>
+            </div>
+          </div>
+
+          {/* Inline audit-log confirmation — spec calls this out explicitly:
+              every grant must show its audit entry inline, no silent success. */}
+          <div style={{ padding: 12, background: "#F3F0F8", borderLeft: `3px solid ${BG}`, borderRadius: "0 6px 6px 0", font: "500 12px/1.5 var(--font-sans)", color: BG }}>
+            {r.id} — Granted at {new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })} by Arjun Bansal · Logged to audit trail · Notifications sent
+          </div>
+
+          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+            <button className="btn" style={{ background: BG, color: "#fff", borderColor: "transparent", flex: 1 }} onClick={() => window.bgStore.openMonitor()}>
+              Monitor live session →
+            </button>
+            <button className="btn" style={{ flex: 1 }} onClick={cancel}>View break-glass record</button>
+          </div>
+          <button className="btn btn-ghost" onClick={cancel} style={{ alignSelf: "center", padding: "6px 10px", color: "var(--fg-4)" }}>Close</button>
+        </div>
+      </Shell>
+    );
+  }
+
+  // ── Screen 7 · Grant failed ────────────────────────────────────
+  if (screen === "failed") {
+    return (
+      <Shell title="Emergency Access — Grant Failed">
+        <div style={{ maxWidth: 520, margin: "48px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 16, textAlign: "center" }}>
+          <div style={{ width: 72, height: 72, borderRadius: "50%", background: "var(--danger-soft)", color: "var(--danger-fg)", display: "inline-flex", alignItems: "center", justifyContent: "center", margin: "0 auto" }}>
+            <Icon name="alert-circle" size={30} color="var(--danger-fg)"/>
+          </div>
+          <div>
+            <div style={{ font: "700 19px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>Grant failed — no access was granted</div>
+            <div style={{ font: "500 13px/1.5 var(--font-sans)", color: "var(--danger-fg)", marginTop: 8 }}>{failReason}</div>
+          </div>
+          <div style={{ padding: 12, background: "var(--danger-soft)", borderRadius: 6, font: "500 12.5px/1.5 var(--font-sans)", color: "var(--danger-fg)" }}>
+            {recipient?.name} has <strong>NOT</strong> received access. No audit record of a successful grant exists.
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button className="btn" style={{ background: BG, color: "#fff", borderColor: "transparent", flex: 1 }} onClick={runGrant}>Retry</button>
+            <button className="btn" style={{ flex: 1 }} onClick={() => { setScreen("form"); setFailReason(null); }}>Edit request</button>
+          </div>
+          <a href="#" onClick={e => { e.preventDefault(); cancel(); }} style={{ font: "500 12.5px/1 var(--font-sans)", color: "var(--fg-4)" }}>Cancel</a>
+        </div>
+      </Shell>
+    );
+  }
+
+  return null;
+};
+
+// =========================================================
+// FLOATING ACTIVE INDICATOR
+// =========================================================
+// Persists across every PAM screen while a break-glass session is active.
+// Bottom-right, deep purple 2px border, live countdown, Monitor + Revoke
+// buttons. Explicitly not dismissible per spec — the admin never loses
+// awareness that an emergency session is running.
+const BGFloatingIndicator = () => {
+  const store = window.useBreakGlass();
+  const a = store.active;
+  const [now, setNow] = React.useState(Date.now());
+  React.useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (!a || store.open === "monitor" || store.open === "trigger") return null;
+
+  const grantedAt = a.grantedAt || now;
+  const totalMs = (a.expiresHrs || a.durationHrs || 4) * 3600 * 1000;
+  const elapsed = now - grantedAt;
+  const remainingMs = Math.max(0, totalMs - elapsed);
+  const hh = Math.floor(remainingMs / 3600000);
+  const mm = Math.floor((remainingMs % 3600000) / 60000);
+  const remaining = remainingMs <= 0 ? "Expired" : `${hh}h ${mm}m remaining`;
+  const warn30 = remainingMs > 0 && remainingMs < 30 * 60 * 1000;
+  const warn10 = remainingMs > 0 && remainingMs < 10 * 60 * 1000;
+  const accent = remainingMs <= 0 ? "var(--danger-fg)" : warn10 ? "var(--danger-fg)" : warn30 ? "var(--warning-fg)" : BG;
+
+  return (
+    <div style={{
+      position: "fixed", bottom: 16, right: 16, zIndex: 250,
+      width: 260, background: "#fff",
+      border: `2px solid ${accent}`, borderRadius: 8,
+      boxShadow: "0 12px 32px rgba(0,0,0,0.14)",
+      animation: warn10 ? "bgPulse 2s infinite" : "none",
+    }}>
+      <div style={{ padding: "10px 14px 6px", display: "flex", alignItems: "center", gap: 6 }}>
+        <span style={{ color: accent, fontSize: 14 }}>⚡</span>
+        <span style={{ font: "700 12px/1 var(--font-sans)", color: accent, textTransform: "uppercase", letterSpacing: 0.5 }}>
+          Active break-glass
+        </span>
+      </div>
+      <div style={{ padding: "0 14px 8px", font: "500 12.5px/1.4 var(--font-sans)", color: "var(--fg-1)" }}>
+        {a.recipient} → <span className="t-mono">{a.resource}</span>
+      </div>
+      <div style={{ padding: "0 14px 10px", font: `${warn10 ? 700 : 600} 12px/1 var(--font-sans)`, color: accent }}>
+        ⏱ {remaining}
+      </div>
+      <div style={{ padding: "8px 10px", borderTop: "1px solid var(--border-subtle)", display: "flex", gap: 6 }}>
+        <button className="btn btn-sm" style={{ background: BG, color: "#fff", borderColor: "transparent", flex: 1 }} onClick={() => window.bgStore.openMonitor()}>
+          Monitor
+        </button>
+        <button className="btn btn-ghost btn-sm" style={{ color: "var(--danger-fg)", flex: "none" }} onClick={() => { window.bgStore.endSession(); window.pamToast("Session revoked", "info"); }}>
+          Revoke
+        </button>
       </div>
     </div>
   );
@@ -482,8 +1041,9 @@ const BreakGlassController = () => {
       {store.open === "trigger" && <BGTriggerModal/>}
       {store.open === "monitor" && store.active && <BGMonitorPanel/>}
       {store.reviewOpen && <BGReviewModal/>}
+      {store.active && <BGFloatingIndicator/>}
     </>
   );
 };
 
-Object.assign(window, { BG_COLOR: BG, BGBadge, SeverityBadge, BGReviewStatus, BGTriggerModal, BGMonitorPanel, BGReviewModal, BreakGlassReviewList, BreakGlassController });
+Object.assign(window, { BG_COLOR: BG, BGBadge, SeverityBadge, BGReviewStatus, BGTriggerModal, BGMonitorPanel, BGReviewModal, BreakGlassReviewList, BreakGlassController, BGFloatingIndicator });
