@@ -62,10 +62,11 @@ const SETTINGS_DATA = {
 // ======= LAYOUT SHELL ====================================================
 const SETTINGS_NAV = [
   { group: "Organization", items: [
-    { id: "general",   label: "General",                        icon: "settings" },
-    { id: "recording", label: "Session Recording & Monitoring", icon: "sessions", issue: true },
-    { id: "proxy",     label: "Proxy Configuration",            icon: "globe" },
-    { id: "notifs",    label: "Notifications",                  icon: "bell" },
+    { id: "general",    label: "General",                        icon: "settings" },
+    { id: "recording",  label: "Session Recording & Monitoring", icon: "sessions", issue: true },
+    { id: "proxy",      label: "Proxy Configuration",            icon: "globe" },
+    { id: "notifs",     label: "Notifications",                  icon: "bell" },
+    { id: "breakglass", label: "Break-Glass",                    icon: "fire" },
   ]},
   { group: "Integrations", items: [
     { id: "vault",   label: "Vault Backend",          icon: "lock" },
@@ -90,10 +91,11 @@ const SettingsScreen = () => {
   const save = (key) => showToast({ kind: "success", text: "Settings saved" });
 
   const sections = {
-    general:   <GeneralSection   data={data} setData={setData} onSave={() => save("general")}/>,
-    recording: <RecordingSection data={data} setData={setData} onSave={() => save("recording")}/>,
-    proxy:     <ProxySection     data={data} setData={setData} onSave={() => save("proxy")} onToast={showToast}/>,
-    notifs:    <NotificationsSection data={data} setData={setData} onSave={() => save("notifs")}/>,
+    general:    <GeneralSection   data={data} setData={setData} onSave={() => save("general")}/>,
+    recording:  <RecordingSection data={data} setData={setData} onSave={() => save("recording")}/>,
+    proxy:      <ProxySection     data={data} setData={setData} onSave={() => save("proxy")} onToast={showToast}/>,
+    notifs:     <NotificationsSection data={data} setData={setData} onSave={() => save("notifs")}/>,
+    breakglass: <SettContent><div><h1 className="h-title">Break-Glass Policy</h1><p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--fg-3)" }}>Every emergency access event is subject to this policy. Changes here apply org-wide.</p></div><BreakGlassConfigSection/></SettContent>,
     vault:     <VaultSection     data={data} setData={setData} onSave={() => save("vault")} onToast={showToast}/>,
     siem:      <SIEMSection      data={data} setData={setData} onSave={() => save("siem")} onToast={showToast}/>,
     storage:   <StorageSection   data={data} setData={setData} onSave={() => save("storage")} onToast={showToast}/>,
@@ -207,7 +209,7 @@ const BreakGlassConfigSection = () => {
   const [c, setC] = React.useState({ ...(window.bgStore ? window.bgStore.config : {}) });
   const set = (k, v) => setC(p => ({ ...p, [k]: v }));
   const setInit = (k, v) => setC(p => ({ ...p, initiators: { ...p.initiators, [k]: v } }));
-  const save = () => { if (window.bgStore) window.bgStore.config = c; window.pamToast && window.pamToast("Break-glass configuration saved"); };
+  const save = () => { if (window.bgStore) window.bgStore.setConfig(c); window.pamToast && window.pamToast("Break-glass configuration saved"); };
   const lock = [["Session recording", "All break-glass sessions are always recorded"], ["Keystroke logging", "All commands are captured"], ["MFA re-verification", "User must re-verify MFA before accessing"], ["Post-incident review required", "Grant cannot be closed without a review"], ["Credential rotation after session", "Credentials used are rotated within 24h of session end"]];
   return (
     <div style={{ borderLeft: `3px solid ${BGc}`, paddingLeft: 18, marginTop: 8 }}>

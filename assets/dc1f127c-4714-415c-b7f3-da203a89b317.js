@@ -31,6 +31,8 @@ const bgSoftStrong = "color-mix(in oklch, #7B3EA8 20%, transparent)";
     active: null,
     open: null,                     // 'trigger' | 'monitor' | 'extend' | 'terminate' | 'recipient-launch' | 'recipient-mfa' | 'post-session'
     reviewOpen: null,
+    recordOpen: null,               // active record in the 3-column detail view
+    pendingReview: null,            // handed off from post-session form to review
     // Live-session data — populated when a grant occurs, drained on endSession.
     activity: [],                   // [{ ts, kind: 'query'|'command'|'access', text, risk, result }]
     audit: [],                      // [{ ts, kind, actor, message }]
@@ -51,6 +53,7 @@ const bgSoftStrong = "color-mix(in oklch, #7B3EA8 20%, transparent)";
     get: () => store,
     emit: () => listeners.forEach(fn => fn()),
     subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
+    setConfig: (patch) => { store.config = { ...store.config, ...patch }; store.emit(); },
     openTrigger: () => { store.open = "trigger"; store.emit(); },
     openMonitor: () => { store.open = "monitor"; store.emit(); },
     openExtend: () => { store.open = "extend"; store.emit(); },
@@ -162,7 +165,10 @@ const bgSoftStrong = "color-mix(in oklch, #7B3EA8 20%, transparent)";
       store.postSession = form;
       store.pendingReview = null;
       store.open = null;
-      store.reviewOpen = rev;
+      // Hand off to the full record-detail view so the admin sees the complete
+      // audit + evidence bundle when they file their review, not a tiny modal.
+      store.recordOpen = rev;
+      store.reviewOpen = null;
       store.audit = [];
       store.emit();
     },
@@ -175,6 +181,8 @@ const bgSoftStrong = "color-mix(in oklch, #7B3EA8 20%, transparent)";
     },
     openReview: (rev) => { store.reviewOpen = rev; store.emit(); },
     closeReview: () => { store.reviewOpen = null; store.emit(); },
+    openRecord: (rev) => { store.recordOpen = rev; store.emit(); },
+    closeRecord: () => { store.recordOpen = null; store.emit(); },
     submitReview: (id, outcome, note) => {
       store.reviews = store.reviews.map(r => r.id === id ? { ...r, status: outcome === "escalated" ? "escalated" : "reviewed", outcome, reviewedBy: "Arjun Bansal", reviewedOn: new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" }), escalationNote: outcome === "escalated" ? note : undefined, rotated: true } : r);
       store.reviewOpen = null; store.emit();
@@ -1556,34 +1564,113 @@ const BGReviewModal = () => {
 };
 
 // =========================================================
-// REVIEW LIST (Audit Portal surface)
+// SPARKLINE — 30-day trend chart used in both records list and compliance.
 // =========================================================
+const BGSparkline = ({ values, color = BG, height = 32, width = 140 }) => {
+  const max = Math.max(1, ...values);
+  const stepX = width / Math.max(1, values.length - 1);
+  const points = values.map((v, i) => `${i * stepX},${height - (v / max) * (height - 4) - 2}`).join(" ");
+  return (
+    <svg width={width} height={height} style={{ display: "block" }}>
+      <polyline points={points} fill="none" stroke={color} strokeWidth={1.5}/>
+      {values.map((v, i) => (
+        <circle key={i} cx={i * stepX} cy={height - (v / max) * (height - 4) - 2} r={1.5} fill={color}/>
+      ))}
+    </svg>
+  );
+};
+
+// =========================================================
+// RECORDS LIST — top-level Break-Glass Review workspace.
+// Four tabs: Records | Compliance | Policy improvement | Compliance log.
+// =========================================================
+const BREAKGLASS_TABS = [
+  { id: "records",     label: "Records",             hint: "Every break-glass event, with review status" },
+  { id: "compliance",  label: "Policy compliance",   hint: "How well each policy is being observed" },
+  { id: "improvement", label: "Policy improvement",  hint: "Suggestions derived from recent records" },
+  { id: "log",         label: "Compliance log",      hint: "Append-only audit of policy changes" },
+];
+
 const BreakGlassReviewList = () => {
   const store = window.useBreakGlass();
-  const reviews = store.reviews;
-  const [filter, setFilter] = React.useState("all");
-  const pending = reviews.filter(r => r.status === "pending").length;
-  const shown = filter === "all" ? reviews : reviews.filter(r => r.status === filter);
+  const [tab, setTab] = React.useState("records");
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <PageHeader title="Break-Glass Review" description="Every emergency access event is recorded and requires post-incident review. Records cannot be closed without review and confirmed credential rotation."/>
-      <div style={{ padding: "14px 24px", borderBottom: "1px solid var(--border-subtle)", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
-        <KPICard label="Total events" value={reviews.length}/>
-        <KPICard label="Pending review" value={pending} accent="var(--warning-fg)" active={filter === "pending"} onClick={() => setFilter(filter === "pending" ? "all" : "pending")}/>
-        <KPICard label="Reviewed" value={reviews.filter(r => r.status === "reviewed").length} accent="var(--success-fg)" active={filter === "reviewed"} onClick={() => setFilter(filter === "reviewed" ? "all" : "reviewed")}/>
-        <KPICard label="Escalated" value={reviews.filter(r => r.status === "escalated").length} accent="var(--danger-fg)" active={filter === "escalated"} onClick={() => setFilter(filter === "escalated" ? "all" : "escalated")}/>
+      <div style={{ display: "flex", gap: 4, padding: "0 24px", borderBottom: "1px solid var(--border-subtle)", background: "var(--bg-app)" }}>
+        {BREAKGLASS_TABS.map(t => {
+          const active = tab === t.id;
+          return (
+            <button key={t.id} onClick={() => setTab(t.id)} title={t.hint} style={{
+              padding: "12px 14px", border: "none", background: "transparent",
+              borderBottom: `2px solid ${active ? BG : "transparent"}`,
+              color: active ? BG : "var(--fg-3)",
+              font: `${active ? 700 : 500} 12.5px/1 var(--font-sans)`,
+              cursor: "pointer", marginBottom: -1,
+            }}>{t.label}</button>
+          );
+        })}
       </div>
+      {tab === "records"     && <BGRecordsTab store={store}/>}
+      {tab === "compliance"  && <BGComplianceTab store={store}/>}
+      {tab === "improvement" && <BGImprovementTab store={store}/>}
+      {tab === "log"         && <BGComplianceLogTab store={store}/>}
+    </div>
+  );
+};
+
+// -------- Tab 1 · Records --------
+const BGRecordsTab = ({ store }) => {
+  const reviews = store.reviews;
+  const [status, setStatus]     = React.useState("all");
+  const [severity, setSeverity] = React.useState("all");
+  const [q, setQ]               = React.useState("");
+  const pending = reviews.filter(r => r.status === "pending").length;
+  const shown = reviews.filter(r => {
+    if (status !== "all" && r.status !== status) return false;
+    if (severity !== "all" && r.severity !== severity) return false;
+    if (q && !`${r.id} ${r.recipient} ${r.resource} ${r.credential}`.toLowerCase().includes(q.toLowerCase())) return false;
+    return true;
+  });
+  // Rough 30-day trend seed — every 30 days, 1 to 4 events.
+  const trend = [1, 2, 1, 3, 2, 4, 2, 1, 3, 2, 5, 3, 2, 4, 1, 2, 3, 2, 4, 5, 3, 2, 1, 2, 3, 4, 2, 3, 1, reviews.length];
+  return (
+    <>
+      <div style={{ padding: "14px 24px", borderBottom: "1px solid var(--border-subtle)", display: "grid", gridTemplateColumns: "repeat(4, 1fr) 220px", gap: 12 }}>
+        <KPICard label="Total events" value={reviews.length}/>
+        <KPICard label="Pending review" value={pending} accent="var(--warning-fg)" active={status === "pending"} onClick={() => setStatus(status === "pending" ? "all" : "pending")}/>
+        <KPICard label="Reviewed" value={reviews.filter(r => r.status === "reviewed").length} accent="var(--success-fg)" active={status === "reviewed"} onClick={() => setStatus(status === "reviewed" ? "all" : "reviewed")}/>
+        <KPICard label="Escalated" value={reviews.filter(r => r.status === "escalated").length} accent="var(--danger-fg)" active={status === "escalated"} onClick={() => setStatus(status === "escalated" ? "all" : "escalated")}/>
+        <div className="card" style={{ padding: 12 }}>
+          <div style={{ font: "500 11px/1 var(--font-sans)", color: "var(--fg-4)", marginBottom: 4 }}>Last 30 days</div>
+          <BGSparkline values={trend}/>
+        </div>
+      </div>
+
       {pending > 0 && (
         <div style={{ margin: "12px 24px 0", padding: 12, background: "var(--warning-soft)", borderRadius: 8, display: "flex", alignItems: "center", gap: 10, font: "400 12.5px/1.5 var(--font-sans)", color: "var(--warning-fg)" }}>
           <Icon name="alert-circle" size={14} color="var(--warning-fg)"/>
           <span style={{ flex: 1 }}><strong>{pending} break-glass event{pending > 1 ? "s" : ""}</strong> awaiting mandatory review. Records stay open until reviewed and credentials confirmed rotated.</span>
         </div>
       )}
-      <div style={{ flex: 1, overflow: "auto", marginTop: 12 }}>
+
+      <div style={{ padding: "12px 24px", display: "flex", gap: 8, alignItems: "center", borderBottom: "1px solid var(--border-subtle)" }}>
+        <input className="input" placeholder="Search events, recipients, resources…" value={q} onChange={e => setQ(e.target.value)} style={{ flex: 1, maxWidth: 320 }}/>
+        <select className="input" value={severity} onChange={e => setSeverity(e.target.value)} style={{ width: 140 }}>
+          <option value="all">All severities</option>
+          <option value="P1">P1 Critical</option>
+          <option value="P2">P2 High</option>
+          <option value="P3">P3 Medium</option>
+        </select>
+        <div style={{ flex: 1 }}/>
+        <div className="t-tiny" style={{ color: "var(--fg-4)" }}>{shown.length} of {reviews.length}</div>
+      </div>
+
+      <div style={{ flex: 1, overflow: "auto" }}>
         <table className="table">
           <thead><tr><th>Event</th><th>Recipient</th><th>Resource</th><th>Severity</th><th>Window</th><th>Credential rotated</th><th>Status</th><th></th></tr></thead>
           <tbody>{shown.map(r => (
-            <tr key={r.id} onClick={() => window.bgStore.openReview(r)} style={{ cursor: "pointer", boxShadow: `inset 3px 0 0 ${BG}` }}>
+            <tr key={r.id} onClick={() => window.bgStore.openRecord(r)} style={{ cursor: "pointer", boxShadow: `inset 3px 0 0 ${BG}` }}>
               <td><span className="t-mono" style={{ fontSize: 12, color: BG, fontWeight: 600 }}>⚡ {r.id}</span></td>
               <td><div style={{ display: "flex", alignItems: "center", gap: 7 }}><Avatar name={r.recipient} size={22}/><span style={{ fontSize: 12.5 }}>{r.recipient}</span></div></td>
               <td className="t-mono" style={{ fontSize: 12, color: "var(--fg-2)" }}>{r.resource}</td>
@@ -1591,10 +1678,301 @@ const BreakGlassReviewList = () => {
               <td className="t-tiny" style={{ color: "var(--fg-3)" }}>{r.started}<div>{r.duration}</div></td>
               <td>{r.rotated ? <span style={{ color: "var(--success-fg)", fontSize: 12 }}>✓ Rotated</span> : <span style={{ color: "var(--warning-fg)", fontSize: 12 }}>Pending</span>}</td>
               <td><BGReviewStatus status={r.status}/></td>
-              <td style={{ textAlign: "right" }}><button className="btn btn-sm" onClick={e => { e.stopPropagation(); window.bgStore.openReview(r); }}>{r.status === "pending" ? "Review" : "View"}</button></td>
+              <td style={{ textAlign: "right" }}><button className="btn btn-sm" onClick={e => { e.stopPropagation(); window.bgStore.openRecord(r); }}>{r.status === "pending" ? "Review" : "View"}</button></td>
             </tr>
-          ))}</tbody>
+          ))}
+          {shown.length === 0 && <tr><td colSpan={8} style={{ textAlign: "center", padding: 40, color: "var(--fg-4)" }}>No records match the current filters.</td></tr>}
+          </tbody>
         </table>
+      </div>
+    </>
+  );
+};
+
+// -------- Tab 2 · Policy compliance --------
+const BG_POLICIES = [
+  { id: "post-review",   label: "Post-incident review completed within 3 days",   target: 100, expected: (r) => r.status === "pending", pass: (r) => r.status !== "pending" },
+  { id: "rotation",      label: "Credential rotated after every session",         target: 100, expected: (r) => true,                     pass: (r) => r.rotated },
+  { id: "ticket",        label: "Every event tied to an incident ticket",         target: 95,  expected: (r) => true,                     pass: (r) => r.ticket && r.ticket !== "—" },
+  { id: "duration",      label: "No session exceeded 8 hours",                    target: 100, expected: (r) => true,                     pass: (r) => !r.durationHrs || r.durationHrs <= 8 },
+  { id: "postsession",   label: "Recipient filed post-session context",           target: 100, expected: (r) => true,                     pass: (r) => !!r.postSession },
+];
+const BGComplianceTab = ({ store }) => {
+  const reviews = store.reviews;
+  return (
+    <div className="scroll-area" style={{ flex: 1, overflow: "auto", padding: 24, display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="card" style={{ padding: 14, background: bgSoft, borderLeft: `3px solid ${BG}`, borderRadius: "0 6px 6px 0" }}>
+        <div style={{ font: "600 12.5px/1.3 var(--font-sans)", color: BG }}>What "compliance" means for break-glass</div>
+        <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>Break-glass policies encode the promises PAM makes to the business — reviews happen fast, credentials rotate, evidence is retained. This tab shows how well each policy is holding up against real events.</div>
+      </div>
+
+      {BG_POLICIES.map(p => {
+        const applicable = reviews.filter(() => true);
+        const passing = applicable.filter(p.pass).length;
+        const rate = applicable.length === 0 ? 100 : Math.round((passing / applicable.length) * 100);
+        const met = rate >= p.target;
+        // Rough sparkline: distribute pass/fail across last 10 events
+        const trend = reviews.slice(0, 10).reverse().map((r, i) => p.pass(r) ? (i + 1) : Math.max(0, i - 1));
+        while (trend.length < 10) trend.unshift(1);
+        return (
+          <div key={p.id} className="card" style={{ padding: 16, display: "grid", gridTemplateColumns: "1fr 160px 100px", gap: 14, alignItems: "center" }}>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                <div style={{ font: "600 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{p.label}</div>
+                {met
+                  ? <span style={{ padding: "2px 8px", borderRadius: 999, background: "var(--success-soft)", color: "var(--success-fg)", font: "600 10.5px/1.5 var(--font-sans)" }}>Meeting target</span>
+                  : <span style={{ padding: "2px 8px", borderRadius: 999, background: "var(--warning-soft)", color: "var(--warning-fg)", font: "600 10.5px/1.5 var(--font-sans)" }}>Below target</span>}
+              </div>
+              <div style={{ font: "400 12px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>Target {p.target}% · {passing} of {applicable.length} records passing</div>
+            </div>
+            <div>
+              <BGSparkline values={trend} color={met ? "var(--success-fg)" : "var(--warning-fg)"}/>
+              <div className="t-tiny" style={{ color: "var(--fg-4)", marginTop: 2 }}>Last 10 records</div>
+            </div>
+            <div style={{ textAlign: "right", font: "700 24px/1 var(--font-sans)", color: met ? "var(--success-fg)" : "var(--warning-fg)" }}>{rate}%</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+// -------- Tab 3 · Policy improvement --------
+const BGImprovementTab = ({ store }) => {
+  const reviews = store.reviews;
+  // Rules of thumb — inspect the corpus of records and surface concrete suggestions.
+  const suggestions = [];
+  const pending = reviews.filter(r => r.status === "pending").length;
+  if (pending > 1) suggestions.push({ severity: "warning", title: `${pending} pending reviews`, body: "Consider shortening the escalation window from 3 days to 2 days, or setting up auto-reminders to review assignees.", change: "Escalation → after 2 days (currently 3)" });
+  const noticket = reviews.filter(r => !r.ticket || r.ticket === "—").length;
+  if (noticket > 0) suggestions.push({ severity: "info", title: `${noticket} record${noticket > 1 ? "s" : ""} without an incident ticket`, body: "Require incident-ticket reference on every break-glass declaration to strengthen the paper-trail.", change: "Require ticket reference → ON" });
+  const p1 = reviews.filter(r => r.severity === "P1").length;
+  if (p1 >= 2) suggestions.push({ severity: "info", title: `${p1} P1 events in recent history`, body: "Consider tightening the P1 duration cap from 8h to 6h — most incidents resolve in the first hour, and long grants become residual risk.", change: "P1 max duration → 6 hours (currently 8)" });
+  const unrotated = reviews.filter(r => !r.rotated).length;
+  if (unrotated > 0) suggestions.push({ severity: "warning", title: `${unrotated} record${unrotated > 1 ? "s" : ""} with unrotated credentials`, body: "Enable auto-rotate-on-session-end to guarantee rotation without human follow-through.", change: "Auto-rotate after session end → ON" });
+
+  return (
+    <div className="scroll-area" style={{ flex: 1, overflow: "auto", padding: 24, display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ font: "400 12.5px/1.6 var(--font-sans)", color: "var(--fg-3)" }}>
+        Policy suggestions are generated from patterns in the last 30 days of break-glass records. Nothing here changes policy automatically — every change lands in the compliance log first.
+      </div>
+      {suggestions.length === 0 ? (
+        <div className="card" style={{ padding: 32, textAlign: "center", color: "var(--fg-3)" }}>
+          <Icon name="check-circle" size={22} color="var(--success-fg)"/>
+          <div style={{ font: "600 13.5px/1.3 var(--font-sans)", color: "var(--fg-1)", marginTop: 10 }}>No suggested policy changes</div>
+          <div style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>Recent records match current policy. Check back after each incident.</div>
+        </div>
+      ) : suggestions.map((s, i) => {
+        const color = s.severity === "warning" ? "var(--warning-fg)" : "var(--brand-fg)";
+        return (
+          <div key={i} className="card" style={{ padding: 14, borderLeft: `3px solid ${color}` }}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ font: "600 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{s.title}</div>
+                <div style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>{s.body}</div>
+                <div style={{ marginTop: 8, padding: 8, background: "var(--bg-surface-2)", borderRadius: 4, font: "500 12px/1.4 var(--font-mono)", color: "var(--fg-2)" }}>
+                  Proposed change: <strong>{s.change}</strong>
+                </div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <button className="btn btn-sm" style={{ background: BG, color: "#fff", borderColor: "transparent" }} onClick={() => window.pamToast && window.pamToast("Change proposed to policy — pending admin approval", "info")}>
+                  Propose change
+                </button>
+                <button className="btn btn-sm btn-ghost" onClick={() => window.pamToast && window.pamToast("Suggestion dismissed", "info")}>Dismiss</button>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+// -------- Tab 4 · Compliance log (append-only) --------
+// Seeded with a few plausible entries so the log looks alive. In production
+// this comes from the audit backend, keyed by config-change events.
+const BG_COMPLIANCE_LOG = [
+  { ts: "May 14, 2026 · 09:12", actor: "Arjun Bansal", kind: "policy", message: "Post-incident review escalation window lowered from 5 days to 3 days" },
+  { ts: "May 09, 2026 · 14:38", actor: "Dana Whitley", kind: "policy", message: "Break-glass eligibility for Operators restricted to `production` tag only" },
+  { ts: "Apr 30, 2026 · 22:04", actor: "system",       kind: "auto",   message: "Automated rotation enabled for all root-primary credentials after break-glass" },
+  { ts: "Apr 24, 2026 · 11:20", actor: "Priya Iyer",   kind: "policy", message: "Ticket reference marked as required on all break-glass declarations" },
+  { ts: "Apr 12, 2026 · 08:47", actor: "system",       kind: "review", message: "BG-2028 review completed — appropriate · credential rotated" },
+];
+const BGComplianceLogTab = () => (
+  <div className="scroll-area" style={{ flex: 1, overflow: "auto", padding: 24 }}>
+    <div className="card" style={{ overflow: "hidden" }}>
+      <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border-subtle)", font: "600 12px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>
+        Break-glass policy log — append-only
+      </div>
+      {BG_COMPLIANCE_LOG.map((ev, i) => {
+        const color = ev.kind === "policy" ? BG : ev.kind === "review" ? "var(--success-fg)" : "var(--brand-fg)";
+        return (
+          <div key={i} style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "12px 16px", borderTop: i === 0 ? "none" : "1px solid var(--border-subtle)" }}>
+            <div style={{ width: 8, height: 8, borderRadius: "50%", background: color, marginTop: 6, flex: "none" }}/>
+            <div style={{ flex: 1 }}>
+              <div style={{ font: "500 12.5px/1.4 var(--font-sans)", color: "var(--fg-1)" }}>{ev.message}</div>
+              <div className="t-tiny" style={{ color: "var(--fg-4)", marginTop: 2 }}>{ev.ts} · {ev.actor} · {ev.kind}</div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  </div>
+);
+
+// =========================================================
+// RECORD DETAIL — full-page, 3-column view of one break-glass record.
+// Left: session context.  Center: merged timeline (audit + activity in time order).
+// Right: evidence bundle + review action (if status is pending).
+// =========================================================
+const BGRecordDetail = () => {
+  const store = window.useBreakGlass();
+  const r = store.recordOpen;
+  const [outcome, setOutcome] = React.useState(r?.outcome || "");
+  const [note, setNote]       = React.useState(r?.escalationNote || "");
+  const [rotated, setRotated] = React.useState(r ? !!r.rotated : false);
+  React.useEffect(() => {
+    if (r) { setOutcome(r.outcome || ""); setNote(r.escalationNote || ""); setRotated(!!r.rotated); }
+  }, [r?.id]);
+  if (!r) return null;
+  const done = r.status !== "pending";
+  const canSubmit = outcome && (outcome !== "escalated" || note.trim()) && rotated;
+
+  // Merge audit + activity into one time-sorted timeline. Guards for records
+  // that pre-date the Phase 2 store shape (activity/audit are missing).
+  const timeline = [
+    ...(r.audit    || []).map(e => ({ ...e, source: "audit"    })),
+    ...(r.activity || []).map(e => ({ ...e, source: "activity" })),
+  ].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  const fmt = (ts) => new Date(ts).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "#fff", display: "flex", flexDirection: "column" }}>
+      <div style={{ padding: "14px 24px", background: bgSoft, borderBottom: `1px solid ${BG}`, display: "flex", alignItems: "center", gap: 12 }}>
+        <span style={{ fontSize: 18 }}>⚡</span>
+        <div style={{ flex: 1 }}>
+          <div style={{ font: "700 15px/1.2 var(--font-sans)", color: BG }}>Break-glass record · {r.id}</div>
+          <div style={{ font: "400 12px/1.4 var(--font-sans)", color: "var(--fg-3)", marginTop: 2 }}>{r.recipient} → {r.resource} · {r.severity}</div>
+        </div>
+        <BGReviewStatus status={r.status}/>
+        <button className="btn btn-ghost btn-icon" onClick={() => window.bgStore.closeRecord()} title="Close"><Icon name="x" size={14}/></button>
+      </div>
+
+      <div style={{ flex: 1, display: "grid", gridTemplateColumns: "300px 1fr 340px", minHeight: 0 }}>
+        {/* LEFT — session context */}
+        <aside style={{ padding: 16, borderRight: "1px solid var(--border)", overflow: "auto", background: "var(--bg-app)", display: "flex", flexDirection: "column", gap: 16 }}>
+          <div>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 8 }}>Session</div>
+            <BGRow k="Recipient">{r.recipient}</BGRow>
+            <BGRow k="Initiator">{r.initiator}</BGRow>
+            <BGRow k="Resource"><span className="t-mono">{r.resource}</span></BGRow>
+            <BGRow k="Severity"><SeverityBadge level={r.severity}/></BGRow>
+            <BGRow k="Credential"><span className="t-mono">{r.credential}</span></BGRow>
+            <BGRow k="Ticket">{r.ticket || "—"}</BGRow>
+            <BGRow k="Started">{r.started}</BGRow>
+            <BGRow k="Ended">{r.ended}</BGRow>
+            <BGRow k="Duration">{r.duration}</BGRow>
+            <BGRow k="Commands">{r.commands || 0}</BGRow>
+            {typeof r.riskScore === "number" && <BGRow k="Risk score">{Math.round(r.riskScore)}</BGRow>}
+          </div>
+
+          <div>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 6 }}>Justification</div>
+            <div style={{ padding: 10, background: "var(--bg-surface-2)", borderRadius: 6, font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-2)" }}>{r.justification}</div>
+          </div>
+
+          {r.postSession && (
+            <div>
+              <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 6 }}>Recipient context</div>
+              <div style={{ padding: 10, background: bgSoft, borderLeft: `3px solid ${BG}`, borderRadius: "0 6px 6px 0", font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-2)", display: "flex", flexDirection: "column", gap: 6 }}>
+                <div><span style={{ color: "var(--fg-4)" }}>What was done:</span> {r.postSession.desc}</div>
+                {r.postSession.commands && <div><span style={{ color: "var(--fg-4)" }}>Key commands:</span> <span className="t-mono">{r.postSession.commands}</span></div>}
+                <div><span style={{ color: "var(--fg-4)" }}>Outcome:</span> <strong style={{ color: "var(--fg-1)", textTransform: "capitalize" }}>{r.postSession.incidentResult}</strong></div>
+                {r.postSession.lessons && <div><span style={{ color: "var(--fg-4)" }}>Lessons:</span> {r.postSession.lessons}</div>}
+              </div>
+            </div>
+          )}
+        </aside>
+
+        {/* CENTER — timeline */}
+        <div style={{ padding: 16, overflow: "auto", display: "flex", flexDirection: "column", gap: 10, background: "var(--bg-surface)" }}>
+          <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>Timeline</div>
+          {timeline.length === 0 ? (
+            <div style={{ padding: 20, color: "var(--fg-4)", font: "400 12.5px/1.5 var(--font-sans)" }}>
+              This record pre-dates the enhanced telemetry — audit and activity trails were not captured.
+            </div>
+          ) : timeline.map((ev, i) => {
+            const isActivity = ev.source === "activity";
+            const color = isActivity
+              ? (ev.risk === "high" ? "var(--danger-fg)" : ev.risk === "medium" ? "var(--warning-fg)" : "var(--fg-3)")
+              : BG;
+            return (
+              <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: 10, background: "#fff", borderRadius: 6, borderLeft: `3px solid ${color}` }}>
+                <div style={{ width: 68, flex: "none", font: "500 11px/1.3 var(--font-mono)", color: "var(--fg-4)", paddingTop: 2 }}>{fmt(ev.ts)}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ font: "500 12.5px/1.4 var(--font-sans)", color: "var(--fg-1)" }}>
+                    {isActivity ? <span className="t-mono">{ev.text}</span> : ev.message}
+                  </div>
+                  <div className="t-tiny" style={{ color: "var(--fg-4)", marginTop: 2 }}>
+                    {isActivity
+                      ? `${ev.risk?.toUpperCase() || "LOW"} · command`
+                      : `${ev.kind || "event"} · ${ev.actor || "system"}`}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* RIGHT — evidence + review */}
+        <aside style={{ padding: 16, borderLeft: "1px solid var(--border)", overflow: "auto", background: "var(--bg-app)", display: "flex", flexDirection: "column", gap: 16 }}>
+          <div>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>Evidence bundle</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <button className="btn btn-sm" onClick={() => window.pamToast && window.pamToast("Opening session recording…", "info")}><Icon name="video" size={11}/> Session recording</button>
+              <button className="btn btn-sm" onClick={() => window.pamToast && window.pamToast("Opening keystroke log…", "info")}><Icon name="terminal" size={11}/> Keystroke log</button>
+              <button className="btn btn-sm" onClick={() => window.pamToast && window.pamToast("Downloading audit bundle…", "info")}><Icon name="download" size={11}/> Download audit bundle</button>
+            </div>
+          </div>
+
+          {!done ? (
+            <div>
+              <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>Review decision</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {[
+                  ["appropriate", "✓ Access was appropriate",   "var(--success-fg)"],
+                  ["escalated",   "⚑ Escalate for further review", "var(--danger-fg)"],
+                ].map(([v, l, c]) => (
+                  <button key={v} onClick={() => setOutcome(v)} style={{ padding: "10px 12px", borderRadius: 6, border: `1px solid ${outcome === v ? c : "var(--border)"}`, background: outcome === v ? `color-mix(in oklch, ${c} 10%, transparent)` : "#fff", color: outcome === v ? c : "var(--fg-1)", font: `${outcome === v ? 600 : 500} 12.5px/1.3 var(--font-sans)`, cursor: "pointer", textAlign: "left" }}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+              {outcome === "escalated" && (
+                <div style={{ marginTop: 10 }}>
+                  <textarea className="input" rows={3} value={note} onChange={e => setNote(e.target.value)} placeholder="Describe what needs further review and to whom this is escalated…"/>
+                </div>
+              )}
+              <label style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: 10, marginTop: 10, background: rotated ? "var(--success-soft)" : "var(--warning-soft)", borderRadius: 6, cursor: "pointer", font: "400 12px/1.5 var(--font-sans)" }}>
+                <input type="checkbox" checked={rotated} onChange={() => setRotated(v => !v)} style={{ marginTop: 2, accentColor: BG }}/>
+                <span>I confirm <span className="t-mono">{r.credential}</span> has been rotated. {!rotated && <span style={{ color: "var(--warning-fg)", fontWeight: 500 }}>The record stays open until rotation is confirmed.</span>}</span>
+              </label>
+              <button
+                className="btn"
+                disabled={!canSubmit}
+                onClick={() => { window.bgStore.submitReview(r.id, outcome, note); window.bgStore.closeRecord(); window.pamToast(outcome === "escalated" ? "Break-glass event escalated" : "Review completed — record closed"); }}
+                style={{ marginTop: 10, width: "100%", background: canSubmit ? BG : "var(--bg-surface-2)", color: canSubmit ? "#fff" : "var(--fg-4)", borderColor: "transparent", padding: "10px 14px", font: "600 13px/1 var(--font-sans)" }}
+              >
+                Complete review
+              </button>
+            </div>
+          ) : (
+            <div style={{ padding: 12, background: r.outcome === "escalated" ? "var(--danger-soft)" : "var(--success-soft)", borderRadius: 6, font: "400 12.5px/1.5 var(--font-sans)", color: r.outcome === "escalated" ? "var(--danger-fg)" : "var(--success-fg)" }}>
+              <strong>{r.outcome === "escalated" ? "Escalated" : "Reviewed — appropriate"}</strong> by {r.reviewedBy} on {r.reviewedOn}. Credential rotated: {r.rotated ? "✓ Yes" : "No"}.
+              {r.escalationNote && <div style={{ marginTop: 6 }}>{r.escalationNote}</div>}
+            </div>
+          )}
+        </aside>
       </div>
     </div>
   );
@@ -1614,10 +1992,11 @@ const BreakGlassController = () => {
       {store.open === "recipient-launch"  && store.active && <BGRecipientLaunch/>}
       {store.open === "recipient-mfa"     && store.active && <BGRecipientMfa/>}
       {store.open === "post-session"      && store.pendingReview && <BGPostSessionForm/>}
+      {store.recordOpen && <BGRecordDetail/>}
       {store.reviewOpen && <BGReviewModal/>}
       {store.active && store.open !== "monitor" && store.open !== "extend" && store.open !== "terminate" && store.open !== "recipient-launch" && store.open !== "recipient-mfa" && <BGFloatingIndicator/>}
     </>
   );
 };
 
-Object.assign(window, { BG_COLOR: BG, BGBadge, SeverityBadge, BGReviewStatus, BGTriggerModal, BGMonitorPanel, BGExtendModal, BGTerminateOverlay, BGRecipientLaunch, BGRecipientMfa, BGPostSessionForm, BGReviewModal, BreakGlassReviewList, BreakGlassController, BGFloatingIndicator });
+Object.assign(window, { BG_COLOR: BG, BGBadge, SeverityBadge, BGReviewStatus, BGTriggerModal, BGMonitorPanel, BGExtendModal, BGTerminateOverlay, BGRecipientLaunch, BGRecipientMfa, BGPostSessionForm, BGReviewModal, BGRecordDetail, BGSparkline, BreakGlassReviewList, BreakGlassController, BGFloatingIndicator });
