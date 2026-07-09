@@ -257,22 +257,99 @@ const DISCOVERED_CREDS = [
   { id: "d-3", display: "svc-legacy@10.0.5.11",       type: "SSH Key",  foundOn: "old-web-01",                foundVia: "Network scan",    foundAt: "3 days ago" },
 ];
 
-const CredentialSourcePicker = ({ value, onChange, resourceContext, compact, existingOnly }) => {
+// Recently used picks — scoped to the admin's own last few Attach/Claim
+// actions across every resource. Single shared list (not per-resource) —
+// the point of Fix 4 is the bulk-rollout case where the same service-
+// account credential is reused across many servers without re-searching.
+// Seeded with two demo entries so the chip strip is visible in the state.
+if (!globalThis.__PAM_RECENT_PICKS) {
+  globalThis.__PAM_RECENT_PICKS = [
+    { mode: "attach", credentialId: "c-005", credentialDisplay: "ssh-key-deploy",  credentialType: "SSH Key" },
+    { mode: "attach", credentialId: "c-002", credentialDisplay: "linux-ssh-admin", credentialType: "Password" },
+  ];
+}
+const pushRecentPick = (pick) => {
+  if (!globalThis.__PAM_RECENT_PICKS) globalThis.__PAM_RECENT_PICKS = [];
+  const key = (p) => p.mode === "attach" ? `c:${p.credentialId}` : p.mode === "claim" ? `d:${p.discoveredId}` : null;
+  const k = key(pick);
+  if (!k) return;
+  globalThis.__PAM_RECENT_PICKS = [pick, ...globalThis.__PAM_RECENT_PICKS.filter(p => key(p) !== k)].slice(0, 3);
+};
+
+// Fix 1 — compatibility rule. Resource type × credential type. Cheap heuristic,
+// not exhaustive. If the resource type is unknown, everything counts as
+// compatible so nothing gets accidentally demoted.
+const isCredCompatibleWithResource = (cred, resource) => {
+  const rt = resource?.type;
+  const ct = cred.type;
+  if (!rt) return true;
+  if (rt === "server")   return ct === "SSH Key" || ct === "Password";
+  if (rt === "database") return ct === "Password";
+  if (rt === "web")      return ct === "App Secret" || ct === "Password";
+  if (rt === "cloud")    return ct === "Password" || (cred.tags || []).includes("cloud-iam");
+  return true;
+};
+const isDiscoveredCompatibleWithResource = (disc, resource) => {
+  const rt = resource?.type;
+  const dt = disc.type;
+  if (!rt) return true;
+  if (rt === "server")   return dt === "SSH Key" || dt === "Password";
+  if (rt === "database") return dt === "Password";
+  if (rt === "web")      return dt === "Password";
+  if (rt === "cloud")    return dt === "Password";
+  return true;
+};
+
+const CredentialSourcePicker = ({ value, onChange, resourceContext, compact, existingOnly, launchContext = "manual", discoveryHost }) => {
   // existingOnly locks the picker to Use-existing. Used by the Break-glass
   // tab's add flow: a credential must already be vaulted before it can be
   // flagged for emergency use — an unvaulted credential can't be marked
   // break-glass-eligible, so hiding the Create-new tab is the right guard.
   const currentMode = value?.mode || "new";
-  const [tab, setTab] = React.useState(existingOnly ? "existing" : (currentMode === "new" ? "new" : "existing"));
-  const [search, setSearch] = React.useState("");
+  // Fix 5 — default opening state depends on where the picker was launched:
+  //   "manual"             — Vaulted (existing behavior)
+  //   "bulk-apply"         — Vaulted (bulk-apply reuses one across many)
+  //   "bulk-discovery-row" — Discovered pre-filtered to that host
+  //   "break-glass"        — existingOnly forces "existing" already
+  const initialTab = existingOnly
+    ? "existing"
+    : (launchContext === "bulk-apply" || launchContext === "bulk-discovery-row")
+      ? "existing"
+      : (currentMode === "new" ? "new" : "existing");
+  const [tab, setTab] = React.useState(initialTab);
+  const [search, setSearch] = React.useState(launchContext === "bulk-discovery-row" && discoveryHost ? discoveryHost : "");
+  // For bulk-discovery-row, Discovered is the primary section (shown first,
+  // pre-filtered to the host); Vaulted collapses behind a "Show N vaulted" toggle.
+  const discoveryFirst = launchContext === "bulk-discovery-row";
+  const [showAllVaulted, setShowAllVaulted] = React.useState(!discoveryFirst);
+  const [showAllDiscovered, setShowAllDiscovered] = React.useState(false);
 
   const vaulted = (globalThis.CREDS || []).map(c => ({
     id: c.id, display: c.display, type: c.type, owner: c.owner, resourceCount: (c.resources || []).length,
+    resources: c.resources || [], tags: c.tags || [],
   }));
   const q = search.trim().toLowerCase();
-  const vaultedMatched = q ? vaulted.filter(c => (c.display + " " + (c.owner || "") + " " + c.type).toLowerCase().includes(q)) : vaulted;
-  const discoveredMatched = q ? DISCOVERED_CREDS.filter(d => (d.display + " " + d.foundOn).toLowerCase().includes(q)) : DISCOVERED_CREDS;
+  const searchFilter = (str) => q ? str.toLowerCase().includes(q) : true;
+  const vaultedMatched = vaulted.filter(c => searchFilter(c.display + " " + (c.owner || "") + " " + c.type));
+  const discoveredMatched = DISCOVERED_CREDS.filter(d => searchFilter(d.display + " " + d.foundOn) && (
+    // For bulk-discovery-row, additionally hard-scope to the discovery host —
+    // once search is manually edited, this stops applying because searchFilter
+    // above will already have narrowed the list.
+    !discoveryHost || !q || d.foundOn.toLowerCase().includes(discoveryHost.toLowerCase())
+  ));
 
+  // Fix 1 — split each list into compatible (with the resource being created)
+  // vs everything else. Never remove — grouping only, always reachable.
+  const [vaultedCompat, vaultedOther] = vaultedMatched.reduce((acc, c) => {
+    acc[isCredCompatibleWithResource(c, resourceContext) ? 0 : 1].push(c);
+    return acc;
+  }, [[], []]);
+  const [discCompat, discOther] = discoveredMatched.reduce((acc, d) => {
+    acc[isDiscoveredCompatibleWithResource(d, resourceContext) ? 0 : 1].push(d);
+    return acc;
+  }, [[], []]);
+
+  const emitAndTrack = (pick) => { onChange(pick); pushRecentPick(pick); };
   const setNew = (patch) => onChange({
     mode: "new",
     username: value?.username || "",
@@ -280,26 +357,206 @@ const CredentialSourcePicker = ({ value, onChange, resourceContext, compact, exi
     secret: value?.secret || "",
     ...patch,
   });
+  const attach = (c) => emitAndTrack({ mode: "attach", credentialId: c.id, credentialDisplay: c.display, credentialType: c.type });
+  const claim  = (d) => emitAndTrack({ mode: "claim",  discoveredId: d.id, discoveredDisplay: d.display, credentialType: d.type });
 
-  const attach = (c) => onChange({ mode: "attach", credentialId: c.id, credentialDisplay: c.display, credentialType: c.type });
-  const claim  = (d) => onChange({ mode: "claim",  discoveredId: d.id, discoveredDisplay: d.display, credentialType: d.type });
+  // Recently used chips — resolve saved picks against current vault + discovered.
+  const recentPicks = (globalThis.__PAM_RECENT_PICKS || []).map(p => {
+    if (p.mode === "attach") {
+      const hit = vaulted.find(v => v.id === p.credentialId);
+      return hit ? { ...p, hitVaulted: hit } : null;
+    }
+    if (p.mode === "claim") {
+      const hit = DISCOVERED_CREDS.find(d => d.id === p.discoveredId);
+      return hit ? { ...p, hitDiscovered: hit } : null;
+    }
+    return null;
+  }).filter(Boolean);
 
-  const CredRow = ({ left, primary, secondary, action, state, onAction, actionLabel }) => (
-    <button type="button" onClick={onAction} style={{
-      width: "100%", display: "flex", alignItems: "center", gap: 10,
-      padding: "10px 12px", border: `1px solid ${state === "active" ? "var(--brand)" : "var(--border)"}`,
-      background: state === "active" ? "var(--brand-soft)" : "var(--bg-app)",
-      borderRadius: 6, cursor: "pointer", textAlign: "left",
-    }}>
-      {left}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ font: `${state === "active" ? 600 : 500} 13px/1.3 var(--font-sans)`, color: "var(--fg-1)" }}>{primary}</div>
-        <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>{secondary}</div>
+  const criticality = (resourceContext?.criticality || "").toLowerCase();
+  const critImpact = criticality === "critical" || criticality === "high";
+
+  const VaultedRow = ({ c }) => {
+    const selected = value?.mode === "attach" && value?.credentialId === c.id;
+    const unowned = !c.owner;
+    const alreadyAttached = c.resourceCount > 0;
+    return (
+      <div>
+        <button type="button" onClick={() => attach(c)} style={{
+          width: "100%", display: "flex", alignItems: "center", gap: 10,
+          padding: "10px 12px",
+          border: `1px solid ${selected ? "var(--brand)" : "var(--border)"}`,
+          background: selected ? "var(--brand-soft)" : "var(--bg-app)",
+          borderRadius: 6, cursor: "pointer", textAlign: "left",
+        }}>
+          <Icon name={c.type === "SSH Key" ? "key" : "lock"} size={13} color="var(--brand-fg)"/>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ font: `${selected ? 600 : 500} 13px/1.3 var(--font-sans)`, color: "var(--fg-1)" }}>{c.display}</span>
+              <span style={{ font: "400 11px/1 var(--font-sans)", color: "var(--fg-4)" }}>· {c.type}</span>
+              {/* Fix 3 — unowned flag with criticality-scaled emphasis. Never
+                  blocks selection; visibility only. */}
+              {unowned && (
+                <span className={critImpact ? "badge badge-danger" : "badge"} style={{ gap: 4 }}>
+                  <Icon name="alert-triangle" size={10}/> No owner assigned
+                </span>
+              )}
+            </div>
+            <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>
+              {c.owner || "Unassigned"} · {c.resourceCount} resource{c.resourceCount === 1 ? "" : "s"}
+            </div>
+          </div>
+          <span style={{ font: "600 11.5px/1 var(--font-sans)", color: "var(--brand-fg)", padding: "4px 10px", border: "1px solid var(--brand)", borderRadius: 999 }}>
+            {selected ? "Selected" : "Attach"}
+          </span>
+        </button>
+        {/* Fix 2 — consequence line for reuse. Only shown when the row is
+            SELECTED (not hovered) and the cred already has attached resources.
+            Not a blocking dialog — inline context that turns Attach from a
+            blind click into an informed one. This is where the shared-credential
+            (Dependent/Subscriber) relationship gets created. */}
+        {selected && alreadyAttached && (
+          <div style={{ marginTop: 6, padding: "8px 10px 8px 22px", background: "var(--brand-soft)", borderLeft: "3px solid var(--brand)", borderRadius: 4, font: "400 12px/1.5 var(--font-sans)", color: "var(--brand-fg)" }}>
+            <strong style={{ color: "var(--brand-fg)" }}>Currently on {c.resources.slice(0, 2).join(", ")}{c.resources.length > 2 ? ` +${c.resources.length - 2} more` : ""}.</strong> Attaching here makes this a shared credential across {c.resourceCount + 1} resources — they'll rotate together.
+          </div>
+        )}
       </div>
-      <span style={{ font: "600 11.5px/1 var(--font-sans)", color: state === "active" ? "var(--brand-fg)" : "var(--brand-fg)", padding: "4px 10px", border: `1px solid ${state === "active" ? "var(--brand)" : "var(--brand)"}`, borderRadius: 999 }}>
-        {state === "active" ? "Selected" : actionLabel}
-      </span>
-    </button>
+    );
+  };
+
+  const DiscoveredRow = ({ d }) => {
+    const selected = value?.mode === "claim" && value?.discoveredId === d.id;
+    return (
+      <button type="button" onClick={() => claim(d)} style={{
+        width: "100%", display: "flex", alignItems: "center", gap: 10,
+        padding: "10px 12px",
+        border: `1px solid ${selected ? "var(--brand)" : "var(--border)"}`,
+        background: selected ? "var(--brand-soft)" : "var(--bg-app)",
+        borderRadius: 6, cursor: "pointer", textAlign: "left",
+      }}>
+        <Icon name="eye" size={13} color="var(--warning-fg)"/>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div>
+            <span className="t-mono" style={{ font: `${selected ? 600 : 500} 12.5px/1.3 var(--font-sans)`, color: "var(--fg-1)" }}>{d.display}</span>
+            <span style={{ marginLeft: 8, font: "400 11px/1 var(--font-sans)", color: "var(--fg-4)" }}>· {d.type}</span>
+          </div>
+          <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>Found via {d.foundVia} · {d.foundAt} · on {d.foundOn}</div>
+        </div>
+        <span style={{ font: "600 11.5px/1 var(--font-sans)", color: "var(--brand-fg)", padding: "4px 10px", border: "1px solid var(--brand)", borderRadius: 999 }}>
+          {selected ? "Selected" : "Claim & vault"}
+        </span>
+      </button>
+    );
+  };
+
+  const SectionHeader = ({ label, count, hint }) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+      <span style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>{label}</span>
+      <span className="badge">{count}</span>
+      {hint && <span style={{ font: "400 11px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>{hint}</span>}
+    </div>
+  );
+
+  const VaultedSection = (
+    <div>
+      <SectionHeader
+        label={launchContext === "bulk-discovery-row" ? "Vaulted" : "Vaulted"}
+        count={vaultedMatched.length}
+        hint={launchContext === "bulk-discovery-row" ? null : "Already managed by PAM · reuse without re-entering the secret"}
+      />
+      {vaultedMatched.length === 0 ? (
+        <div style={{ padding: 14, textAlign: "center", font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-4)" }}>
+          {q ? `No vaulted credentials match "${search}".` : "No vaulted credentials yet."}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {vaultedCompat.length > 0 && (
+            <>
+              {resourceContext?.type && vaultedOther.length > 0 && (
+                <div style={{ font: "500 11px/1.3 var(--font-sans)", color: "var(--fg-4)", padding: "2px 4px" }}>
+                  Matches this resource · <strong style={{ color: "var(--fg-2)" }}>{vaultedCompat.length}</strong>
+                </div>
+              )}
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: compact ? 180 : 240, overflowY: "auto", paddingRight: 4 }}>
+                {vaultedCompat.map(c => <VaultedRow key={c.id} c={c}/>)}
+              </div>
+            </>
+          )}
+          {vaultedOther.length > 0 && (
+            <div style={{ marginTop: vaultedCompat.length ? 4 : 0 }}>
+              {resourceContext?.type && vaultedCompat.length > 0 ? (
+                <button type="button" onClick={() => setShowAllVaulted(x => !x)} style={{
+                  width: "100%", padding: "8px 10px",
+                  border: "1px dashed var(--border)", background: "transparent",
+                  color: "var(--brand-fg)", borderRadius: 6, cursor: "pointer",
+                  font: "500 12px/1 var(--font-sans)", textAlign: "left",
+                  display: "flex", alignItems: "center", gap: 6,
+                }}>
+                  <Icon name={showAllVaulted ? "chevron-down" : "chevron-right"} size={11} color="var(--brand-fg)"/>
+                  {showAllVaulted ? `Hide other vaulted credentials` : `Show all ${vaultedOther.length} other vaulted credential${vaultedOther.length === 1 ? "" : "s"} →`}
+                </button>
+              ) : null}
+              {(showAllVaulted || !resourceContext?.type || vaultedCompat.length === 0) && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6, maxHeight: compact ? 180 : 240, overflowY: "auto", paddingRight: 4 }}>
+                  {vaultedOther.map(c => <VaultedRow key={c.id} c={c}/>)}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  const DiscoveredSection = (
+    <div>
+      <SectionHeader
+        label="Discovered"
+        count={discoveredMatched.length}
+        hint={launchContext === "bulk-discovery-row" ? `On ${discoveryHost || "this host"} · claim to manage` : "Found on the network but not yet vaulted · claim to manage"}
+      />
+      {discoveredMatched.length === 0 ? (
+        <div style={{ padding: 14, textAlign: "center", font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-4)" }}>
+          {q ? `No discovered credentials match "${search}".` : "No discovered credentials yet."}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {discCompat.length > 0 && (
+            <>
+              {resourceContext?.type && discOther.length > 0 && (
+                <div style={{ font: "500 11px/1.3 var(--font-sans)", color: "var(--fg-4)", padding: "2px 4px" }}>
+                  Matches this resource · <strong style={{ color: "var(--fg-2)" }}>{discCompat.length}</strong>
+                </div>
+              )}
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: compact ? 140 : 200, overflowY: "auto", paddingRight: 4 }}>
+                {discCompat.map(d => <DiscoveredRow key={d.id} d={d}/>)}
+              </div>
+            </>
+          )}
+          {discOther.length > 0 && (
+            <div style={{ marginTop: discCompat.length ? 4 : 0 }}>
+              {resourceContext?.type && discCompat.length > 0 ? (
+                <button type="button" onClick={() => setShowAllDiscovered(x => !x)} style={{
+                  width: "100%", padding: "8px 10px",
+                  border: "1px dashed var(--border)", background: "transparent",
+                  color: "var(--brand-fg)", borderRadius: 6, cursor: "pointer",
+                  font: "500 12px/1 var(--font-sans)", textAlign: "left",
+                  display: "flex", alignItems: "center", gap: 6,
+                }}>
+                  <Icon name={showAllDiscovered ? "chevron-down" : "chevron-right"} size={11} color="var(--brand-fg)"/>
+                  {showAllDiscovered ? "Hide other discovered credentials" : `Show all ${discOther.length} other discovered credential${discOther.length === 1 ? "" : "s"} →`}
+                </button>
+              ) : null}
+              {(showAllDiscovered || !resourceContext?.type || discCompat.length === 0) && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6, maxHeight: compact ? 140 : 200, overflowY: "auto", paddingRight: 4 }}>
+                  {discOther.map(d => <DiscoveredRow key={d.id} d={d}/>)}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 
   return (
@@ -343,54 +600,53 @@ const CredentialSourcePicker = ({ value, onChange, resourceContext, compact, exi
 
       {tab === "existing" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {/* Fix 4 — recently used chips. Above Vaulted/Discovered. Scoped to
+              the admin's own recent Attach/Claim actions across all resources
+              (single shared list). Directly serves the bulk-rollout case. */}
+          {recentPicks.length > 0 && (
+            <div>
+              <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 6 }}>Recently used</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {recentPicks.map((p, i) => {
+                  const isVaulted = p.mode === "attach";
+                  const active = isVaulted
+                    ? (value?.mode === "attach" && value?.credentialId === p.credentialId)
+                    : (value?.mode === "claim" && value?.discoveredId === p.discoveredId);
+                  const label = isVaulted ? p.credentialDisplay : p.discoveredDisplay;
+                  return (
+                    <button key={i} type="button" onClick={() => isVaulted ? attach(p.hitVaulted) : claim(p.hitDiscovered)} style={{
+                      display: "inline-flex", alignItems: "center", gap: 6,
+                      padding: "5px 10px",
+                      border: `1px solid ${active ? "var(--brand)" : "var(--border)"}`,
+                      background: active ? "var(--brand-soft)" : "var(--bg-app)",
+                      color: active ? "var(--brand-fg)" : "var(--fg-2)",
+                      borderRadius: 999, cursor: "pointer",
+                      font: `${active ? 600 : 500} 12px/1.2 var(--font-sans)`,
+                    }}>
+                      <Icon name={isVaulted ? (p.credentialType === "SSH Key" ? "key" : "lock") : "eye"} size={11} color={active ? "var(--brand-fg)" : (isVaulted ? "var(--brand-fg)" : "var(--warning-fg)")}/>
+                      {label}
+                      <span style={{ font: "400 10.5px/1 var(--font-sans)", opacity: 0.7 }}>· {isVaulted ? "Attach" : "Claim"}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <div style={{ position: "relative" }}>
             <Icon name="search" size={13} color="var(--fg-4)" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }}/>
             <input className="input" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by display name, owner, or discovered host…" style={{ paddingLeft: 30 }}/>
+            {launchContext === "bulk-discovery-row" && discoveryHost && (
+              <div style={{ marginTop: 4, font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>
+                Pre-filtered to <strong style={{ color: "var(--fg-2)" }}>{discoveryHost}</strong> · clear the search to see everything.
+              </div>
+            )}
           </div>
 
-          <div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              <span style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>Vaulted</span>
-              <span className="badge">{vaultedMatched.length}</span>
-              <span style={{ font: "400 11px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>Already managed by PAM · reuse without re-entering the secret</span>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: compact ? 180 : 240, overflowY: "auto", paddingRight: 4 }}>
-              {vaultedMatched.length === 0 && (
-                <div style={{ padding: 14, textAlign: "center", font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-4)" }}>No vaulted credentials match "{search}".</div>
-              )}
-              {vaultedMatched.map(c => (
-                <CredRow key={c.id}
-                  left={<Icon name={c.type === "SSH Key" ? "key" : "lock"} size={13} color="var(--brand-fg)"/>}
-                  primary={<><span>{c.display}</span><span style={{ marginLeft: 8, font: "400 11px/1 var(--font-sans)", color: "var(--fg-4)" }}>· {c.type}</span></>}
-                  secondary={<>{c.owner || "Unassigned"} · {c.resourceCount} resource{c.resourceCount === 1 ? "" : "s"}</>}
-                  actionLabel="Attach"
-                  state={value?.mode === "attach" && value?.credentialId === c.id ? "active" : null}
-                  onAction={() => attach(c)}/>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              <span style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>Discovered</span>
-              <span className="badge">{discoveredMatched.length}</span>
-              <span style={{ font: "400 11px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>Found on the network but not yet vaulted · claim to manage</span>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: compact ? 140 : 200, overflowY: "auto", paddingRight: 4 }}>
-              {discoveredMatched.length === 0 && (
-                <div style={{ padding: 14, textAlign: "center", font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-4)" }}>No discovered credentials match "{search}".</div>
-              )}
-              {discoveredMatched.map(d => (
-                <CredRow key={d.id}
-                  left={<Icon name="eye" size={13} color="var(--warning-fg)"/>}
-                  primary={<><span className="t-mono" style={{ fontSize: 12.5 }}>{d.display}</span><span style={{ marginLeft: 8, font: "400 11px/1 var(--font-sans)", color: "var(--fg-4)" }}>· {d.type}</span></>}
-                  secondary={<>Found via {d.foundVia} · {d.foundAt} · on {d.foundOn}</>}
-                  actionLabel="Claim & vault"
-                  state={value?.mode === "claim" && value?.discoveredId === d.id ? "active" : null}
-                  onAction={() => claim(d)}/>
-              ))}
-            </div>
-          </div>
+          {/* Fix 5 — bulk-discovery-row context puts Discovered first so the
+              claimable local accounts show up before Vaulted. All other
+              contexts keep Vaulted first. */}
+          {discoveryFirst ? <>{DiscoveredSection}{VaultedSection}</> : <>{VaultedSection}{DiscoveredSection}</>}
         </div>
       )}
     </div>
@@ -521,7 +777,8 @@ const NewStep1RootCred = ({ data, setData }) => {
           <CredentialSourcePicker
             value={data.credentialSource}
             onChange={(v) => patch("credentialSource", v)}
-            resourceContext={{ name: data.name, type: data.type }}
+            resourceContext={{ name: data.name, type: data.type, criticality: data.criticality, env: data.env }}
+            launchContext="manual"
           />
         </div>
       </div>
@@ -710,14 +967,18 @@ const BulkImportPanel = ({ source, onClose, onDone }) => {
   const openRowPicker = (rowId) => {
     const row = rows.find(r => r.id === rowId);
     setPickerDraft(row?.credentialSource || null);
-    setPickerFor({ rowId });
+    // Per-row picker on a discovery result opens on Discovered pre-filtered to
+    // that host — the local account claimable on that specific target is the
+    // most likely pick.
+    setPickerFor({ rowId, launchContext: "bulk-discovery-row", discoveryHost: row?.host });
   };
   const openBulkPicker = () => {
     // Bulk-apply starts blank — the admin picks an existing credential to
-    // attach to every selected row in one motion. This is the "five servers,
-    // one credential, one interaction" win called out in the spec.
+    // attach to every selected row in one motion. Opens on Vaulted because
+    // reusing one existing credential across many rows is the intent here,
+    // not claiming newly discovered ones.
     setPickerDraft(null);
-    setPickerFor({ bulk: true });
+    setPickerFor({ bulk: true, launchContext: "bulk-apply" });
   };
   const applyPicker = () => {
     if (!pickerDraft || !credentialSourceValid(pickerDraft)) return;
@@ -874,7 +1135,17 @@ const BulkImportPanel = ({ source, onClose, onDone }) => {
               </div>
             </div>
             <div style={{ padding: 20, overflowY: "auto", flex: 1 }}>
-              <CredentialSourcePicker value={pickerDraft} onChange={setPickerDraft} compact/>
+              <CredentialSourcePicker
+                value={pickerDraft}
+                onChange={setPickerDraft}
+                compact
+                launchContext={pickerFor?.launchContext}
+                discoveryHost={pickerFor?.discoveryHost}
+                resourceContext={pickerFor?.rowId ? (() => {
+                  const r = rows.find(x => x.id === pickerFor.rowId);
+                  return r ? { name: r.name, type: r.type, criticality: r.criticality, env: r.env } : null;
+                })() : null}
+              />
             </div>
             <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end", gap: 8, background: "var(--bg-surface)" }}>
               <button className="btn" onClick={closePicker}>Cancel</button>
