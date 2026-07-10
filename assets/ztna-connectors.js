@@ -24,9 +24,9 @@ const ZTNA_CERT_EXPIRING_DAYS  = 30;
 
   const store = {
     sites: [
-      { id: "site-mumbai",    name: "AWS Mumbai VPC",       environment: "AWS",     region: "ap-south-1",  description: "Primary APAC region — ledger + auth + reporting DBs live here.", createdAt: now - 45 * 86400000 },
-      { id: "site-frankfurt", name: "On-prem Frankfurt DC", environment: "On-prem", region: "eu-central-1", description: "European data-residency workloads.", createdAt: now - 21 * 86400000 },
-      { id: "site-tokyo",     name: "Azure Tokyo",          environment: "Azure",   region: "japaneast",    description: "Recently added — no connector deployed yet.",                  createdAt: now - 2 * 86400000 },
+      { id: "site-mumbai",    name: "AWS Mumbai VPC",       environment: "AWS",     region: "ap-south-1",  description: "Primary APAC region — ledger + auth + reporting DBs live here.", createdAt: now - 45 * 86400000, preferredConnectorId: "conn-mumbai-1" },
+      { id: "site-frankfurt", name: "On-prem Frankfurt DC", environment: "On-prem", region: "eu-central-1", description: "European data-residency workloads.", createdAt: now - 21 * 86400000, preferredConnectorId: null },
+      { id: "site-tokyo",     name: "Azure Tokyo",          environment: "Azure",   region: "japaneast",    description: "Recently added — no connector deployed yet.",                  createdAt: now - 2 * 86400000, preferredConnectorId: null },
     ],
 
     connectors: [
@@ -64,7 +64,7 @@ const ZTNA_CERT_EXPIRING_DAYS  = 30;
     troubleConnectorId: null,
 
     // Setup flow state (Surface D). Populated when open === "setup-flow".
-    setup: null,         // { entry: "new-site" | "existing-site", step, siteId, siteDraft, connectorDraft, token, status }
+    setup: null,         // { entry: "new-site" | "existing-site", step, siteId, siteDraft, connectorDrafts[], heartbeatSec, certMonths, deployments[], status }
 
     emit: () => listeners.forEach(fn => fn()),
     subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
@@ -88,90 +88,132 @@ const ZTNA_CERT_EXPIRING_DAYS  = 30;
     //   openSetupNewSite()          — full 4-step flow, starting at Create site
     //   openSetupExistingSite(id)   — 3-step flow (Configure → Deploy → Confirm) for an already-created site
     openSetupNewSite: () => {
-      store.setup = { entry: "new-site", step: 1, siteDraft: { name: "", environment: "AWS", region: "", description: "" }, connectorDraft: { name: "", platform: "Linux", heartbeatSec: 60, certMonths: 12 }, token: null, status: "idle" };
+      store.setup = { entry: "new-site", step: 1, siteDraft: { name: "", environment: "AWS", region: "", description: "" }, connectorDrafts: [{ name: "", platform: "Linux" }], heartbeatSec: 60, certMonths: 12, deployments: null, status: "idle" };
       store.open = "setup-flow";
       store.emit();
     },
     openSetupExistingSite: (siteId) => {
       const site = store.sites.find(s => s.id === siteId);
-      store.setup = { entry: "existing-site", step: 1, siteId, siteDraft: site, connectorDraft: { name: "", platform: "Linux", heartbeatSec: 60, certMonths: 12 }, token: null, status: "idle" };
+      store.setup = { entry: "existing-site", step: 1, siteId, siteDraft: site, connectorDrafts: [{ name: "", platform: "Linux" }], heartbeatSec: 60, certMonths: 12, deployments: null, status: "idle" };
       store.open = "setup-flow";
       store.emit();
     },
     setupUpdate: (patch) => { store.setup = { ...store.setup, ...patch }; store.emit(); },
     setupUpdateSite: (patch) => { store.setup = { ...store.setup, siteDraft: { ...store.setup.siteDraft, ...patch } }; store.emit(); },
-    setupUpdateConnector: (patch) => { store.setup = { ...store.setup, connectorDraft: { ...store.setup.connectorDraft, ...patch } }; store.emit(); },
+    // Multi-connector drafts: a site can be created with several connectors
+    // in one run (redundancy from day one). Each draft is name + platform;
+    // heartbeat and cert validity are shared across the batch.
+    setupUpdateConnectorAt: (idx, patch) => {
+      store.setup = { ...store.setup, connectorDrafts: store.setup.connectorDrafts.map((d, i) => i === idx ? { ...d, ...patch } : d) };
+      store.emit();
+    },
+    setupAddConnectorDraft: () => {
+      store.setup = { ...store.setup, connectorDrafts: [...store.setup.connectorDrafts, { name: "", platform: "Linux" }] };
+      store.emit();
+    },
+    setupRemoveConnectorDraft: (idx) => {
+      if (store.setup.connectorDrafts.length <= 1) return;   // a site needs at least one connector
+      store.setup = { ...store.setup, connectorDrafts: store.setup.connectorDrafts.filter((_, i) => i !== idx) };
+      store.emit();
+    },
     setupNext: () => { store.setup = { ...store.setup, step: store.setup.step + 1 }; store.emit(); },
     setupBack: () => { store.setup = { ...store.setup, step: Math.max(1, store.setup.step - 1) }; store.emit(); },
-    // Generate an enrollment token; also persist the site + connector records
-    // so if the admin closes the flow the site sticks around in Not-enrolled
-    // state (spec: "deploy later" should save records, not silently discard).
+    _mintToken: (siteId, connectorId) =>
+      `eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.${btoa(JSON.stringify({ site: siteId, connector: connectorId, iat: Date.now(), exp: Date.now() + 24 * 3600 * 1000 })).replace(/=+$/, "")}.demo-signature-${Math.random().toString(36).slice(2, 10)}`,
+    // Generate one enrollment token PER connector draft; persist the site +
+    // all connector records so "deploy later" keeps everything in
+    // Not-enrolled state rather than silently discarding.
     setupGenerateToken: () => {
       const s = store.setup;
       let siteId = s.siteId;
       if (s.entry === "new-site" && !siteId) {
         siteId = "site-" + Math.random().toString(36).slice(2, 8);
-        store.sites = [...store.sites, { id: siteId, name: s.siteDraft.name, environment: s.siteDraft.environment, region: s.siteDraft.region, description: s.siteDraft.description, createdAt: now }];
+        store.sites = [...store.sites, { id: siteId, name: s.siteDraft.name, environment: s.siteDraft.environment, region: s.siteDraft.region, description: s.siteDraft.description, createdAt: now, preferredConnectorId: null }];
       }
-      const connectorId = "conn-" + Math.random().toString(36).slice(2, 8);
-      const token = `eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.${btoa(JSON.stringify({ site: siteId, connector: connectorId, iat: now, exp: now + 24 * 3600 * 1000 })).replace(/=+$/, "")}.demo-signature-${Math.random().toString(36).slice(2, 10)}`;
-      store.connectors = [...store.connectors, {
-        id: connectorId, siteId, name: s.connectorDraft.name, platform: s.connectorDraft.platform,
-        heartbeatIntervalSec: s.connectorDraft.heartbeatSec,
-        // Not-enrolled until first heartbeat. Marked with a far-past
-        // lastHeartbeatMs so connectorStatus() returns "offline" until the
-        // simulated connect fires.
-        lastHeartbeatMs: 0,
-        certExpiresAt: now + s.connectorDraft.certMonths * 30 * 86400000,
-        latencyMs: null,
-        enrolling: true,
-      }];
-      store.setup = { ...store.setup, siteId, connectorId, token, step: s.entry === "new-site" ? 3 : 2, status: "waiting", waitStartTs: Date.now() };
-      // Simulate the connector dialing in after 6 seconds. In prod this would
-      // be a real webhook or long-poll — for the demo, setTimeout is fine.
-      if (store._setupTimer) clearTimeout(store._setupTimer);
-      store._setupTimer = setTimeout(() => {
-        if (!store.setup || store.setup.connectorId !== connectorId) return;
-        store.connectors = store.connectors.map(c => c.id === connectorId ? { ...c, lastHeartbeatMs: now, enrolling: false, latencyMs: 45 } : c);
-        store.events = [{ ts: now, siteId, connectorId, kind: "created", message: "Connector enrolled" }, { ts: now, siteId, connectorId, kind: "heartbeat", message: "First heartbeat received" }, ...store.events];
-        store.setup = { ...store.setup, status: "connected" };
-        store.emit();
-        // Auto-advance to Confirm after the 1.5s success animation.
+      const deployments = s.connectorDrafts.map(d => {
+        const connectorId = "conn-" + Math.random().toString(36).slice(2, 8);
+        store.connectors = [...store.connectors, {
+          id: connectorId, siteId, name: d.name, platform: d.platform,
+          heartbeatIntervalSec: s.heartbeatSec,
+          lastHeartbeatMs: 0,               // offline until first heartbeat
+          certExpiresAt: now + s.certMonths * 30 * 86400000,
+          latencyMs: null, enrolling: true,
+        }];
+        return { connectorId, name: d.name, platform: d.platform, token: store._mintToken(siteId, connectorId), status: "waiting" };
+      });
+      store.setup = { ...store.setup, siteId, deployments, step: s.entry === "new-site" ? 3 : 2, status: "waiting", waitStartTs: Date.now() };
+      // Simulate each connector dialing in, staggered so multi-connector runs
+      // show individual progress rather than all flipping at once.
+      store._setupTimers = deployments.map((d, i) => setTimeout(() => store._completeDeployment(d.connectorId), 6000 + i * 2500));
+      store.emit();
+    },
+    _completeDeployment: (connectorId) => {
+      const s = store.setup;
+      if (!s || !s.deployments || !s.deployments.some(d => d.connectorId === connectorId)) return;
+      store.connectors = store.connectors.map(c => c.id === connectorId ? { ...c, lastHeartbeatMs: now, enrolling: false, latencyMs: 45 } : c);
+      store.events = [{ ts: now, siteId: s.siteId, connectorId, kind: "created", message: "Connector enrolled" }, ...store.events];
+      const deployments = s.deployments.map(d => d.connectorId === connectorId ? { ...d, status: "connected" } : d);
+      const allConnected = deployments.every(d => d.status === "connected");
+      store.setup = { ...s, deployments, status: allConnected ? "connected" : s.status };
+      store.emit();
+      if (allConnected) {
         setTimeout(() => {
-          if (!store.setup || store.setup.connectorId !== connectorId) return;
+          if (!store.setup || store.setup.siteId !== s.siteId) return;
           store.setup = { ...store.setup, step: store.setup.entry === "new-site" ? 4 : 3 };
           store.emit();
         }, 1500);
-      }, 6000);
-      store.emit();
+      }
     },
     setupForceTimeout: () => {
       if (!store.setup) return;
       store.setup = { ...store.setup, status: "timeout" };
       store.emit();
     },
-    setupRegenerateToken: () => {
-      if (!store.setup) return;
-      // Rotate the token but keep the same connectorId — matches how a real
-      // enrollment endpoint would behave.
-      const newToken = `eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.${btoa(JSON.stringify({ site: store.setup.siteId, connector: store.setup.connectorId, iat: Date.now(), exp: Date.now() + 24 * 3600 * 1000 })).replace(/=+$/, "")}.demo-signature-${Math.random().toString(36).slice(2, 10)}`;
-      store.setup = { ...store.setup, token: newToken, status: "waiting" };
+    setupRegenerateToken: (connectorId) => {
+      if (!store.setup || !store.setup.deployments) return;
+      store.setup = { ...store.setup, deployments: store.setup.deployments.map(d => d.connectorId === connectorId ? { ...d, token: store._mintToken(store.setup.siteId, connectorId) } : d), status: "waiting" };
       store.emit();
     },
-    setupSimulateConnect: () => {
-      // Manual override for the demo — instantly complete Step 3.
-      if (!store.setup) return;
-      if (store._setupTimer) clearTimeout(store._setupTimer);
-      const connectorId = store.setup.connectorId;
-      store.connectors = store.connectors.map(c => c.id === connectorId ? { ...c, lastHeartbeatMs: now, enrolling: false, latencyMs: 45 } : c);
-      store.events = [{ ts: now, siteId: store.setup.siteId, connectorId, kind: "created", message: "Connector enrolled" }, ...store.events];
-      store.setup = { ...store.setup, status: "connected" };
+    setupSimulateConnect: (connectorId) => {
+      // Demo override. With an id → connect that one; without → connect all
+      // outstanding ones.
+      if (!store.setup || !store.setup.deployments) return;
+      (store._setupTimers || []).forEach(t => clearTimeout(t));
+      store._setupTimers = [];
+      const targets = connectorId ? [connectorId] : store.setup.deployments.filter(d => d.status === "waiting").map(d => d.connectorId);
+      targets.forEach(id => store._completeDeployment(id));
+    },
+
+    // ── deletion ───────────────────────────────────────────
+    // Destructive paths are commanded from confirm modals in the UI — the
+    // store just executes and logs. Deleting a connector revokes its cert
+    // (record removal implies revocation in this prototype).
+    deleteConnector: (connId) => {
+      const c = store.connectors.find(cc => cc.id === connId);
+      if (!c) return;
+      store.connectors = store.connectors.filter(cc => cc.id !== connId);
+      // Clear preferred-connector pointers at both levels.
+      store.sites = store.sites.map(s => s.preferredConnectorId === connId ? { ...s, preferredConnectorId: null } : s);
+      store.events = [{ ts: now, siteId: c.siteId, connectorId: connId, kind: "deleted", message: `Connector ${c.name} deleted — certificate revoked` }, ...store.events];
+      if (store.renewConnectorId === connId) { store.renewConnectorId = null; store.open = null; }
+      if (store.troubleConnectorId === connId) { store.troubleConnectorId = null; store.open = null; }
       store.emit();
-      setTimeout(() => {
-        if (!store.setup || store.setup.connectorId !== connectorId) return;
-        store.setup = { ...store.setup, step: store.setup.entry === "new-site" ? 4 : 3 };
-        store.emit();
-      }, 1500);
+    },
+    deleteSite: (siteId) => {
+      const site = store.sites.find(s => s.id === siteId);
+      if (!site) return;
+      store.sites = store.sites.filter(s => s.id !== siteId);
+      store.connectors = store.connectors.filter(c => c.siteId !== siteId);
+      // Resources assigned here lose their ZTNA routing — they will surface
+      // as unrouted, not silently rerouted somewhere else.
+      store.resourceAssignments = store.resourceAssignments.filter(a => a.siteId !== siteId);
+      store.events = store.events.filter(e => e.siteId !== siteId);
+      if (store.detailSiteId === siteId) { store.detailSiteId = null; store.open = null; }
+      store.emit();
+    },
+    setSitePreferredConnector: (siteId, connId) => {
+      store.sites = store.sites.map(s => s.id === siteId ? { ...s, preferredConnectorId: connId || null } : s);
+      store.emit();
     },
     // Certificate renewal simulation
     renewGenerate: (months) => {
@@ -189,7 +231,8 @@ const ZTNA_CERT_EXPIRING_DAYS  = 30;
       }, 4000);
     },
     close: () => {
-      if (store._setupTimer) { clearTimeout(store._setupTimer); store._setupTimer = null; }
+      (store._setupTimers || []).forEach(t => clearTimeout(t));
+      store._setupTimers = [];
       store.open = null; store.detailSiteId = null; store.renewConnectorId = null;
       store.troubleConnectorId = null;
       store.renewStatus = null; store.renewMonths = null;
@@ -293,6 +336,29 @@ const ZTNADot = ({ status, size = 8 }) => {
   return <span style={{ width: size, height: size, borderRadius: "50%", background: s.dot, display: "inline-block", flex: "none" }}/>;
 };
 
+// Delete confirmation — consequence-forward, red only on the commit button.
+// `consequence` is the line that spells out what breaks; keep it specific
+// ("2 resources become unreachable"), never generic ("are you sure?").
+const ZTNADeleteModal = ({ title, body, consequence, confirmLabel, onConfirm, onClose }) => (
+  <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 340, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+    <div onClick={e => e.stopPropagation()} style={{ width: 460, maxWidth: "94vw", background: "#fff", borderRadius: 8, boxShadow: "0 24px 60px rgba(0,0,0,0.35)", overflow: "hidden" }}>
+      <div style={{ padding: "16px 20px 0" }}>
+        <div style={{ font: "700 15px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{title}</div>
+        <div style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 6 }}>{body}</div>
+        {consequence && (
+          <div style={{ marginTop: 12, padding: 10, background: "var(--danger-soft)", color: "var(--danger-fg)", borderLeft: "3px solid var(--danger-fg)", borderRadius: "0 4px 4px 0", font: "500 12px/1.5 var(--font-sans)" }}>
+            {consequence}
+          </div>
+        )}
+      </div>
+      <div style={{ padding: "14px 20px", marginTop: 8, display: "flex", gap: 8, justifyContent: "flex-end", background: "var(--bg-surface)", borderTop: "1px solid var(--border)" }}>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn" onClick={onConfirm} style={{ background: "var(--danger-fg)", color: "#fff", borderColor: "transparent", fontWeight: 600 }}>{confirmLabel}</button>
+      </div>
+    </div>
+  </div>
+);
+
 // =========================================================
 // CONCEPT EXPLAINER PANEL (Surface C)
 // =========================================================
@@ -371,6 +437,7 @@ const ZTNAConceptPanel = () => (
 // =========================================================
 const ZTNASiteDetailPanel = () => {
   const store = window.useZtna();
+  const [confirmDelete, setConfirmDelete] = React.useState(false);
   const site = store.sites.find(s => s.id === store.detailSiteId);
   if (!site) return null;
   const status  = store.siteStatus(site.id);
@@ -419,7 +486,23 @@ const ZTNASiteDetailPanel = () => {
               <div style={{ padding: 14, background: "var(--bg-surface-2)", borderRadius: 6, font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-3)", textAlign: "center" }}>
                 No connectors deployed yet. Add one to activate this site.
               </div>
-            ) : conns.map(c => <ZTNAConnectorRow key={c.id} c={c} compact/>)}
+            ) : <>
+              {conns.map(c => <ZTNAConnectorRow key={c.id} c={c} compact/>)}
+              {/* Preferred connector — site-level setting. PAM routes new
+                  sessions through the preferred connector when healthy and
+                  fails over to any other online connector when not. */}
+              <div style={{ marginTop: 10 }}>
+                <Field label="Preferred connector" hint="PAM routes through this connector when healthy, and fails over to others in the site automatically.">
+                  <select className="input" value={site.preferredConnectorId || ""} onChange={e => window.ztnaStore.setSitePreferredConnector(site.id, e.target.value)}>
+                    <option value="">Automatic — PAM picks a healthy connector</option>
+                    {conns.map(c => {
+                      const st = store.connectorStatus(c);
+                      return <option key={c.id} value={c.id}>{ZTNA_STATUS[st]?.glyph || "●"} {c.name} · {ZTNA_STATUS[st]?.label}</option>;
+                    })}
+                  </select>
+                </Field>
+              </div>
+            </>}
           </section>
 
           {/* Section 3 — health events */}
@@ -440,7 +523,29 @@ const ZTNASiteDetailPanel = () => {
               })}
             </div>
           </section>
+
+          {/* Danger zone */}
+          <section style={{ border: "1px solid var(--danger)", borderRadius: 8, padding: 14, background: "color-mix(in oklch, var(--danger) 4%, transparent)" }}>
+            <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--danger-fg)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 8 }}>Danger zone</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ flex: 1, font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>
+                Delete this site, its {conns.length} connector{conns.length === 1 ? "" : "s"}, and unassign {resCount} resource{resCount === 1 ? "" : "s"}.
+              </div>
+              <button className="btn btn-sm" onClick={() => setConfirmDelete(true)} style={{ color: "var(--danger-fg)", borderColor: "var(--danger-fg)" }}>Delete site</button>
+            </div>
+          </section>
         </div>
+
+        {confirmDelete && (
+          <ZTNADeleteModal
+            title={`Delete site ${site.name}?`}
+            body={`The site and its ${conns.length} connector record${conns.length === 1 ? "" : "s"} are removed, and all connector certificates are revoked. Deployed connector processes on your hosts stop connecting but are not uninstalled.`}
+            consequence={resCount > 0 ? `${resCount} resource${resCount === 1 ? "" : "s"} routed through this site lose ZTNA routing and become unreachable until reassigned.` : null}
+            confirmLabel="Delete site"
+            onConfirm={() => { setConfirmDelete(false); window.ztnaStore.deleteSite(site.id); window.pamToast && window.pamToast(`Site ${site.name} deleted`, "info"); }}
+            onClose={() => setConfirmDelete(false)}
+          />
+        )}
       </aside>
     </div>
   );
@@ -455,6 +560,19 @@ const ZTNAConnectorRow = ({ c, compact }) => {
   const s = ZTNA_STATUS[status];
   const certSoon = store.certExpiringSoon(c);
   const daysLeft = store.certDaysLeft(c);
+  const site = store.sites.find(ss => ss.id === c.siteId);
+  const isPreferred = site?.preferredConnectorId === c.id;
+  const [confirmDelete, setConfirmDelete] = React.useState(false);
+  // Deleting the site's only ONLINE connector strands its resources — the
+  // consequence line must say so, not a generic "are you sure".
+  const siteConns = store.siteConnectors(c.siteId);
+  const otherOnline = siteConns.some(cc => cc.id !== c.id && store.connectorStatus(cc) === "online");
+  const affected = store.siteResources(c.siteId).length;
+  const consequence = !otherOnline && affected > 0
+    ? `This is the only online connector in ${site?.name}. Deleting it leaves ${affected} resource${affected === 1 ? "" : "s"} unreachable until another connector comes online.`
+    : siteConns.length === 1
+      ? `This is the only connector in ${site?.name} — the site becomes Not enrolled.`
+      : null;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: compact ? "8px 10px" : "10px 12px", background: "#fff", border: "1px solid var(--border-subtle)", borderRadius: 6, marginBottom: 6 }}>
       <ZTNADot status={status}/>
@@ -462,6 +580,9 @@ const ZTNAConnectorRow = ({ c, compact }) => {
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
           <span className="t-mono" style={{ font: "500 12.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{c.name}</span>
           <span style={{ padding: "1px 7px", background: "var(--bg-surface-2)", color: "var(--fg-3)", borderRadius: 4, font: "500 10.5px/1.4 var(--font-sans)" }}>{c.platform}</span>
+          {isPreferred && (
+            <span style={{ padding: "1px 7px", background: "var(--brand-soft)", color: "var(--brand-fg)", borderRadius: 4, font: "600 10.5px/1.4 var(--font-sans)" }}>★ Preferred</span>
+          )}
           {certSoon && (
             <span style={{ padding: "1px 7px", background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 4, font: "500 10.5px/1.4 var(--font-sans)" }}>
               Cert expires in {daysLeft} days
@@ -488,6 +609,19 @@ const ZTNAConnectorRow = ({ c, compact }) => {
           Renew →
         </button>
       )}
+      <button className="btn btn-ghost btn-sm btn-icon" title="Delete connector" onClick={() => setConfirmDelete(true)} style={{ color: "var(--fg-4)" }}>
+        <Icon name="trash" size={13}/>
+      </button>
+      {confirmDelete && (
+        <ZTNADeleteModal
+          title={`Delete connector ${c.name}?`}
+          body={`The connector record is removed from ${site?.name || "its site"} and its enrollment certificate is revoked immediately. The process on your host stops connecting but is not uninstalled.`}
+          consequence={consequence}
+          confirmLabel="Delete connector"
+          onConfirm={() => { setConfirmDelete(false); window.ztnaStore.deleteConnector(c.id); window.pamToast && window.pamToast(`Connector ${c.name} deleted`, "info"); }}
+          onClose={() => setConfirmDelete(false)}
+        />
+      )}
     </div>
   );
 };
@@ -506,6 +640,7 @@ const ZTNASiteCard = ({ site }) => {
   // Sites with problems start expanded — the admin needs to see what's wrong.
   // Healthy sites start collapsed to keep the page scannable.
   const [expanded, setExpanded] = React.useState(status !== "online");
+  const [confirmDelete, setConfirmDelete] = React.useState(false);
 
   return (
     <div className="card" style={{ borderLeft: `3px solid ${accent}`, padding: 16, marginBottom: 14 }}>
@@ -524,7 +659,21 @@ const ZTNASiteCard = ({ site }) => {
         <div style={{ flex: 1 }}/>
         <button className="btn btn-sm" onClick={e => { e.stopPropagation(); window.ztnaStore.openSiteDetail(site.id); }}><Icon name="edit" size={12}/></button>
         <button className="btn btn-sm" onClick={e => { e.stopPropagation(); window.ztnaStore.openSetupExistingSite(site.id); }}>+ Add connector</button>
+        <button className="btn btn-ghost btn-sm btn-icon" title="Delete site" onClick={e => { e.stopPropagation(); setConfirmDelete(true); }} style={{ color: "var(--fg-4)" }}>
+          <Icon name="trash" size={13}/>
+        </button>
       </div>
+
+      {confirmDelete && (
+        <ZTNADeleteModal
+          title={`Delete site ${site.name}?`}
+          body={`The site and its ${totalCount} connector record${totalCount === 1 ? "" : "s"} are removed, and all connector certificates are revoked. Deployed connector processes on your hosts stop connecting but are not uninstalled.`}
+          consequence={assigned.length > 0 ? `${assigned.length} resource${assigned.length === 1 ? "" : "s"} routed through this site lose${assigned.length === 1 ? "s" : ""} ZTNA routing and become${assigned.length === 1 ? "s" : ""} unreachable until reassigned.` : null}
+          confirmLabel="Delete site"
+          onConfirm={() => { setConfirmDelete(false); window.ztnaStore.deleteSite(site.id); window.pamToast && window.pamToast(`Site ${site.name} deleted`, "info"); }}
+          onClose={() => setConfirmDelete(false)}
+        />
+      )}
 
       {expanded && <>
 
@@ -836,53 +985,70 @@ const ZTNASetupCreateSite = ({ s }) => (
   </div>
 );
 
-// -------- Configure connector step --------
+// -------- Configure connector step (supports multiple drafts) --------
 const ZTNASetupConfigureConnector = ({ s, siteName }) => (
   <div style={{ maxWidth: 640, margin: "32px auto", padding: "0 32px", display: "flex", flexDirection: "column", gap: 20 }}>
     <div>
-      <h1 style={{ font: "700 22px/1.2 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Configure connector</h1>
-      <p style={{ font: "400 13.5px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "6px 0 0" }}>Add a connector record in PAM. You'll deploy it in the next step.</p>
+      <h1 style={{ font: "700 22px/1.2 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Configure connector{s.connectorDrafts.length > 1 ? "s" : ""}</h1>
+      <p style={{ font: "400 13.5px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "6px 0 0" }}>Add connector records in PAM. You'll deploy each in the next step — two or more give the site failover from day one.</p>
     </div>
     <div style={{ padding: "8px 12px", background: "var(--bg-surface-2)", borderRadius: 6, font: "500 12px/1.4 var(--font-sans)", color: "var(--fg-2)" }}>
       Site: <strong>{siteName}</strong> · <ZTNADot status="online"/>
     </div>
 
-    <Field label="Connector display name" required hint="Use a descriptive name — you may add more connectors to this site later for redundancy.">
-      <input className="input" autoFocus value={s.connectorDraft.name} onChange={e => window.ztnaStore.setupUpdateConnector({ name: e.target.value })} placeholder="e.g. mumbai-connector-01"/>
-    </Field>
-
-    <Field label="Platform" required>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
-        {[
-          { v: "Linux",   hint: "Recommended for most server environments" },
-          { v: "Windows", hint: "For Windows Server environments" },
-          { v: "Docker",  hint: "For containerized environments" },
-        ].map(p => {
-          const sel = s.connectorDraft.platform === p.v;
-          return (
-            <button key={p.v} onClick={() => window.ztnaStore.setupUpdateConnector({ platform: p.v })} style={{
-              padding: 14, border: `1.5px solid ${sel ? "var(--brand-fg)" : "var(--border)"}`,
-              background: sel ? "var(--brand-soft)" : "#fff", textAlign: "left",
-              borderRadius: 8, cursor: "pointer", display: "flex", flexDirection: "column", gap: 4,
-            }}>
-              <span style={{ font: `${sel ? 700 : 600} 13px/1 var(--font-sans)`, color: sel ? "var(--brand-fg)" : "var(--fg-1)" }}>{p.v}</span>
-              <span style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-3)" }}>{p.hint}</span>
-            </button>
-          );
-        })}
-      </div>
-    </Field>
-
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-      <Field label="Heartbeat interval" hint="Lower = faster failure detection, higher = less network noise.">
+    {s.connectorDrafts.map((d, i) => (
+      <div key={i} className="card" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input className="input" type="number" value={s.connectorDraft.heartbeatSec} onChange={e => window.ztnaStore.setupUpdateConnector({ heartbeatSec: +e.target.value })} style={{ width: 100 }}/>
+          <span style={{ font: "600 11px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>Connector {i + 1}</span>
+          <div style={{ flex: 1 }}/>
+          {s.connectorDrafts.length > 1 && (
+            <button className="btn btn-ghost btn-sm btn-icon" title="Remove this connector" onClick={() => window.ztnaStore.setupRemoveConnectorDraft(i)} style={{ color: "var(--fg-4)" }}>
+              <Icon name="trash" size={12}/>
+            </button>
+          )}
+        </div>
+        <Field label="Connector display name" required hint={i === 0 ? "Use a descriptive name — e.g. region + sequence." : null}>
+          <input className="input" autoFocus={i === s.connectorDrafts.length - 1} value={d.name} onChange={e => window.ztnaStore.setupUpdateConnectorAt(i, { name: e.target.value })} placeholder={`e.g. mumbai-connector-0${i + 1}`}/>
+        </Field>
+        <Field label="Platform" required>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+            {[
+              { v: "Linux",   hint: "Recommended for most server environments" },
+              { v: "Windows", hint: "For Windows Server environments" },
+              { v: "Docker",  hint: "For containerized environments" },
+            ].map(p => {
+              const sel = d.platform === p.v;
+              return (
+                <button key={p.v} onClick={() => window.ztnaStore.setupUpdateConnectorAt(i, { platform: p.v })} style={{
+                  padding: 12, border: `1.5px solid ${sel ? "var(--brand-fg)" : "var(--border)"}`,
+                  background: sel ? "var(--brand-soft)" : "#fff", textAlign: "left",
+                  borderRadius: 8, cursor: "pointer", display: "flex", flexDirection: "column", gap: 4,
+                }}>
+                  <span style={{ font: `${sel ? 700 : 600} 12.5px/1 var(--font-sans)`, color: sel ? "var(--brand-fg)" : "var(--fg-1)" }}>{p.v}</span>
+                  <span style={{ font: "400 11px/1.4 var(--font-sans)", color: "var(--fg-3)" }}>{p.hint}</span>
+                </button>
+              );
+            })}
+          </div>
+        </Field>
+      </div>
+    ))}
+
+    <button className="btn" onClick={() => window.ztnaStore.setupAddConnectorDraft()} style={{ alignSelf: "flex-start" }}>
+      <Icon name="plus" size={12}/> Add another connector
+    </button>
+
+    {/* Shared across every connector created in this run */}
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+      <Field label="Heartbeat interval" hint="Applies to all connectors above. Lower = faster failure detection.">
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input className="input" type="number" value={s.heartbeatSec} onChange={e => window.ztnaStore.setupUpdate({ heartbeatSec: +e.target.value })} style={{ width: 100 }}/>
           <span style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-3)" }}>seconds</span>
         </div>
       </Field>
-      <Field label="Certificate validity" hint="PAM auto-generates a certificate for the outbound tunnel.">
+      <Field label="Certificate validity" hint="PAM auto-generates a certificate per connector.">
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input className="input" type="number" value={s.connectorDraft.certMonths} onChange={e => window.ztnaStore.setupUpdateConnector({ certMonths: +e.target.value })} style={{ width: 100 }}/>
+          <input className="input" type="number" value={s.certMonths} onChange={e => window.ztnaStore.setupUpdate({ certMonths: +e.target.value })} style={{ width: 100 }}/>
           <span style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-3)" }}>months</span>
         </div>
       </Field>
@@ -890,52 +1056,46 @@ const ZTNASetupConfigureConnector = ({ s, siteName }) => (
   </div>
 );
 
-// -------- Deploy step (enrollment token) --------
-const ZTNASetupDeploy = ({ s, siteName }) => {
+// -------- Deploy step — one token card per connector --------
+const ZTNADeploymentCard = ({ s, d }) => {
   const [copied, setCopied] = React.useState(false);
   const [altOpen, setAltOpen] = React.useState(false);
   const command = `curl -sSL https://pam.northwind.com/install/connector.sh | \\
-  bash -s -- --token ${s.token} \\
+  bash -s -- --token ${d.token} \\
   --site ${s.siteId} \\
-  --connector ${s.connectorDraft.name}`;
+  --connector ${d.name}`;
   const winCommand = `Invoke-WebRequest https://pam.northwind.com/install/connector.ps1 -OutFile connector.ps1
-.\\connector.ps1 -Token '${s.token}' -Site '${s.siteId}' -Connector '${s.connectorDraft.name}'`;
+.\\connector.ps1 -Token '${d.token}' -Site '${s.siteId}' -Connector '${d.name}'`;
   const dockerCommand = `docker run -d --name pam-connector --restart=always \\
-  -e PAM_TOKEN=${s.token} \\
+  -e PAM_TOKEN=${d.token} \\
   -e PAM_SITE=${s.siteId} \\
-  -e PAM_CONNECTOR=${s.connectorDraft.name} \\
+  -e PAM_CONNECTOR=${d.name} \\
   pam/connector:latest`;
-
-  const copy = () => {
-    navigator.clipboard.writeText(command);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
+  const primary = d.platform === "Windows" ? winCommand : d.platform === "Docker" ? dockerCommand : command;
+  const connected = d.status === "connected";
 
   return (
-    <div style={{ maxWidth: 800, margin: "32px auto", padding: "0 32px", display: "flex", flexDirection: "column", gap: 20 }}>
-      <div>
-        <h1 style={{ font: "700 22px/1.2 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Deploy your connector</h1>
-        <p style={{ font: "400 13.5px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "6px 0 0" }}>Run this command inside your private network. The connector will dial out to PAM automatically.</p>
+    <div className="card" style={{ padding: 0, overflow: "hidden", border: `2px solid ${connected ? "var(--success-fg)" : "var(--brand-fg)"}` }}>
+      <div style={{ padding: "10px 16px", background: connected ? "var(--success-soft)" : "var(--brand-soft)", display: "flex", alignItems: "center", gap: 10 }}>
+        <span className="t-mono" style={{ font: "700 12px/1 var(--font-sans)", color: connected ? "var(--success-fg)" : "var(--brand-fg)" }}>{d.name}</span>
+        <span style={{ padding: "1px 7px", background: "rgba(255,255,255,0.6)", color: "var(--fg-3)", borderRadius: 4, font: "500 10.5px/1.4 var(--font-sans)" }}>{d.platform}</span>
+        <div style={{ flex: 1 }}/>
+        {connected ? (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "700 12px/1 var(--font-sans)", color: "var(--success-fg)" }}>✓ Connected</span>
+        ) : (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, font: "500 11.5px/1 var(--font-sans)", color: "var(--brand-fg)" }}>
+            <Spinner size={11}/> Waiting…
+            <button className="btn btn-sm" onClick={() => window.ztnaStore.setupSimulateConnect(d.connectorId)} style={{ fontSize: 10.5, marginLeft: 4 }}>[Demo] Connect</button>
+          </span>
+        )}
       </div>
-
-      <div style={{ padding: "8px 12px", background: "var(--bg-surface-2)", borderRadius: 6, font: "500 12px/1.4 var(--font-sans)", color: "var(--fg-2)" }}>
-        Site: <strong>{siteName}</strong> · Connector: <strong>{s.connectorDraft.name}</strong> · Platform: <strong>{s.connectorDraft.platform}</strong>
-      </div>
-
-      <div className="card" style={{ padding: 0, overflow: "hidden", border: "2px solid var(--brand-fg)" }}>
-        <div style={{ padding: "10px 16px", background: "var(--brand-soft)", display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ font: "700 11px/1 var(--font-sans)", color: "var(--brand-fg)", textTransform: "uppercase", letterSpacing: 0.6 }}>Enrollment token</span>
-          <span style={{ padding: "2px 8px", background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 999, font: "600 10.5px/1 var(--font-sans)" }}>Valid for 24 hours</span>
-        </div>
-        <pre style={{ margin: 0, padding: 16, background: "#0F1115", color: "#DFE3E8", font: "500 12.5px/1.6 var(--font-mono)", overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-{s.connectorDraft.platform === "Windows" ? winCommand : s.connectorDraft.platform === "Docker" ? dockerCommand : command}
-        </pre>
-        <div style={{ padding: 12, display: "flex", gap: 8, background: "var(--bg-surface)" }}>
-          <button className="btn btn-primary btn-sm" onClick={copy}>
+      {!connected && <>
+        <pre style={{ margin: 0, padding: 14, background: "#0F1115", color: "#DFE3E8", font: "500 12px/1.6 var(--font-mono)", overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{primary}</pre>
+        <div style={{ padding: 10, display: "flex", gap: 8, background: "var(--bg-surface)" }}>
+          <button className="btn btn-primary btn-sm" onClick={() => { navigator.clipboard.writeText(primary); setCopied(true); setTimeout(() => setCopied(false), 2000); }}>
             <Icon name="copy" size={12}/> {copied ? "Copied ✓" : "Copy command"}
           </button>
-          <button className="btn btn-sm" onClick={() => { if (confirm("This will invalidate the current token. Only do this if you've lost the command.")) window.ztnaStore.setupRegenerateToken(); }}>
+          <button className="btn btn-sm" onClick={() => { if (confirm("This will invalidate the current token for " + d.name + ". Only do this if you've lost the command.")) window.ztnaStore.setupRegenerateToken(d.connectorId); }}>
             Regenerate token
           </button>
           <div style={{ flex: 1 }}/>
@@ -943,73 +1103,70 @@ const ZTNASetupDeploy = ({ s, siteName }) => {
             Show alternatives {altOpen ? "↑" : "↓"}
           </button>
         </div>
+        {altOpen && (
+          <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10, borderTop: "1px solid var(--border-subtle)" }}>
+            {[["Linux (bash)", command], ["Windows (PowerShell)", winCommand], ["Docker", dockerCommand]].map(([label, cmd]) => (
+              <div key={label}>
+                <div style={{ font: "600 11px/1.4 var(--font-sans)", color: "var(--fg-3)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</div>
+                <pre style={{ margin: 0, padding: 10, background: "var(--bg-surface-2)", color: "var(--fg-1)", font: "500 11.5px/1.5 var(--font-mono)", borderRadius: 4, overflow: "auto", whiteSpace: "pre-wrap" }}>{cmd}</pre>
+              </div>
+            ))}
+          </div>
+        )}
+      </>}
+    </div>
+  );
+};
+
+const ZTNASetupDeploy = ({ s, siteName }) => {
+  const deployments = s.deployments || [];
+  const connectedCount = deployments.filter(d => d.status === "connected").length;
+  return (
+    <div style={{ maxWidth: 800, margin: "32px auto", padding: "0 32px", display: "flex", flexDirection: "column", gap: 16 }}>
+      <div>
+        <h1 style={{ font: "700 22px/1.2 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>Deploy your connector{deployments.length > 1 ? "s" : ""}</h1>
+        <p style={{ font: "400 13.5px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "6px 0 0" }}>
+          Run {deployments.length > 1 ? "each command on its own host" : "this command"} inside your private network. Connectors dial out to PAM automatically.
+        </p>
+      </div>
+
+      <div style={{ padding: "8px 12px", background: "var(--bg-surface-2)", borderRadius: 6, font: "500 12px/1.4 var(--font-sans)", color: "var(--fg-2)", display: "flex", alignItems: "center", gap: 8 }}>
+        <span>Site: <strong>{siteName}</strong> · {deployments.length} connector{deployments.length === 1 ? "" : "s"}</span>
+        <div style={{ flex: 1 }}/>
+        {deployments.length > 1 && (
+          <span style={{ font: "600 12px/1 var(--font-sans)", color: connectedCount === deployments.length ? "var(--success-fg)" : "var(--brand-fg)" }}>
+            {connectedCount}/{deployments.length} connected
+          </span>
+        )}
       </div>
 
       <div style={{ padding: 10, background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 4, font: "500 12px/1.5 var(--font-sans)", display: "flex", alignItems: "flex-start", gap: 8 }}>
         <Icon name="alert-circle" size={13} color="var(--warning-fg)"/>
-        <span>This token is single-use. Once the connector connects successfully, the token is invalidated. Do not share this token.</span>
+        <span>Tokens are single-use and valid for 24 hours. Once a connector connects successfully, its token is invalidated. Do not share these tokens.</span>
       </div>
 
-      {altOpen && (
-        <div className="card" style={{ padding: 12, display: "flex", flexDirection: "column", gap: 12 }}>
-          <div>
-            <div style={{ font: "600 11px/1.4 var(--font-sans)", color: "var(--fg-3)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 }}>Linux (bash)</div>
-            <pre style={{ margin: 0, padding: 10, background: "var(--bg-surface-2)", color: "var(--fg-1)", font: "500 11.5px/1.5 var(--font-mono)", borderRadius: 4, overflow: "auto", whiteSpace: "pre-wrap" }}>{command}</pre>
-          </div>
-          <div>
-            <div style={{ font: "600 11px/1.4 var(--font-sans)", color: "var(--fg-3)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 }}>Windows (PowerShell)</div>
-            <pre style={{ margin: 0, padding: 10, background: "var(--bg-surface-2)", color: "var(--fg-1)", font: "500 11.5px/1.5 var(--font-mono)", borderRadius: 4, overflow: "auto", whiteSpace: "pre-wrap" }}>{winCommand}</pre>
-          </div>
-          <div>
-            <div style={{ font: "600 11px/1.4 var(--font-sans)", color: "var(--fg-3)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 }}>Docker</div>
-            <pre style={{ margin: 0, padding: 10, background: "var(--bg-surface-2)", color: "var(--fg-1)", font: "500 11.5px/1.5 var(--font-mono)", borderRadius: 4, overflow: "auto", whiteSpace: "pre-wrap" }}>{dockerCommand}</pre>
+      {deployments.map(d => <ZTNADeploymentCard key={d.connectorId} s={s} d={d}/>)}
+
+      {s.status === "timeout" && (
+        <div style={{ padding: 14, background: "#fff", border: "1px solid var(--warning-fg)", borderRadius: 8 }}>
+          <div style={{ font: "600 13.5px/1.3 var(--font-sans)", color: "var(--warning-fg)" }}>Taking longer than expected? Common reasons:</div>
+          <ul style={{ font: "400 12.5px/1.6 var(--font-sans)", color: "var(--fg-2)", margin: "8px 0 0 18px" }}>
+            <li>Are you running the command as root / with sudo?</li>
+            <li>Can the VM reach pam.northwind.com on port 443 outbound?</li>
+            <li>Is the VM's system clock correct? Token validation requires accurate time.</li>
+          </ul>
+          <div style={{ marginTop: 10 }}>
+            <button className="btn btn-sm">View troubleshooting guide →</button>
           </div>
         </div>
       )}
 
-      {/* Waiting / connected / timeout states */}
-      <div style={{ padding: 20, background: "#fff", border: "1px solid var(--border)", borderRadius: 8, textAlign: "center" }}>
-        {s.status === "waiting" && (
-          <>
-            <div style={{ display: "inline-flex", alignItems: "center", gap: 10, font: "600 14px/1.3 var(--font-sans)", color: "var(--brand-fg)" }}>
-              <Spinner size={14}/>
-              <span>Waiting for connector to connect…</span>
-            </div>
-            <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-4)", marginTop: 6 }}>PAM is listening for the first heartbeat from <span className="t-mono">{s.connectorDraft.name}</span>.</div>
-            <div style={{ marginTop: 12, display: "flex", gap: 8, justifyContent: "center" }}>
-              <button className="btn btn-sm" onClick={() => window.ztnaStore.setupSimulateConnect()} style={{ fontSize: 11 }}>[Demo] Simulate connect</button>
-              <button className="btn btn-sm btn-ghost" onClick={() => window.ztnaStore.setupForceTimeout()} style={{ fontSize: 11 }}>[Demo] Force timeout</button>
-            </div>
-          </>
-        )}
-        {s.status === "connected" && (
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 10, font: "700 15px/1.3 var(--font-sans)", color: "var(--success-fg)" }}>
-            <div style={{ width: 24, height: 24, borderRadius: "50%", background: "var(--success-soft)", color: "var(--success-fg)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>✓</div>
-            <span>{s.connectorDraft.name} connected!</span>
-          </div>
-        )}
-        {s.status === "timeout" && (
-          <div style={{ textAlign: "left" }}>
-            <div style={{ font: "600 13.5px/1.3 var(--font-sans)", color: "var(--warning-fg)" }}>Taking longer than expected? Common reasons:</div>
-            <ul style={{ font: "400 12.5px/1.6 var(--font-sans)", color: "var(--fg-2)", margin: "8px 0 0 18px" }}>
-              <li>Are you running the command as root / with sudo?</li>
-              <li>Can the VM reach pam.northwind.com on port 443 outbound?</li>
-              <li>Is the VM's system clock correct? Token validation requires accurate time.</li>
-            </ul>
-            <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
-              <button className="btn btn-sm">View troubleshooting guide →</button>
-              <button className="btn btn-sm btn-ghost" onClick={() => window.ztnaStore.setupRegenerateToken()}>Regenerate token</button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div style={{ textAlign: "center", marginTop: 8 }}>
+      <div style={{ textAlign: "center", marginTop: 4 }}>
         <button className="btn btn-ghost" onClick={() => window.ztnaStore.close()} style={{ color: "var(--fg-3)" }}>
-          I'll deploy this later →
+          I'll deploy {deployments.length > 1 ? "these" : "this"} later →
         </button>
         <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", marginTop: 4 }}>
-          Your site + connector record will be saved in Not-enrolled state. The token remains valid for 24 hours.
+          Your site + connector record{deployments.length === 1 ? "" : "s"} will be saved in Not-enrolled state. Tokens remain valid for 24 hours.
         </div>
       </div>
     </div>
@@ -1019,21 +1176,29 @@ const ZTNASetupDeploy = ({ s, siteName }) => {
 // -------- Confirm step --------
 const ZTNASetupConfirm = ({ s, siteName }) => {
   const site = window.ztnaStore.sites.find(ss => ss.id === s.siteId);
-  const connector = window.ztnaStore.connectors.find(c => c.id === s.connectorId);
+  const connectors = (s.deployments || []).map(d => window.ztnaStore.connectors.find(c => c.id === d.connectorId)).filter(Boolean);
+  const first = connectors[0];
   return (
     <div style={{ maxWidth: 720, margin: "48px auto", padding: "0 32px", display: "flex", flexDirection: "column", gap: 22, textAlign: "center" }}>
       <div>
         <div style={{ width: 72, height: 72, borderRadius: "50%", background: "var(--success-soft)", color: "var(--success-fg)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 32, marginBottom: 12 }}>✓</div>
         <h1 style={{ font: "700 24px/1.2 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>{siteName} is ready</h1>
-        <div style={{ font: "400 13.5px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "8px auto 0", maxWidth: 460 }}>Your connector is online. Assign resources to this site to start routing through it.</div>
+        <div style={{ font: "400 13.5px/1.5 var(--font-sans)", color: "var(--fg-3)", margin: "8px auto 0", maxWidth: 460 }}>
+          {connectors.length > 1 ? `All ${connectors.length} connectors are online — the site has failover from day one.` : "Your connector is online."} Assign resources to this site to start routing through it.
+        </div>
       </div>
 
       <div className="card" style={{ padding: 16, border: "2px solid var(--success-fg)", textAlign: "left" }}>
         <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", rowGap: 8, columnGap: 12, font: "400 12.5px/1.5 var(--font-sans)" }}>
           <span style={{ color: "var(--fg-4)" }}>Site</span><span style={{ color: "var(--fg-1)", fontWeight: 500 }}>{siteName} <ZTNAStatusBadge status="online" size="sm"/></span>
-          <span style={{ color: "var(--fg-4)" }}>Connector</span><span className="t-mono">{connector?.name} <span style={{ color: "var(--fg-4)" }}>({connector?.platform})</span> <ZTNAStatusBadge status="online" size="sm"/></span>
+          {connectors.map(c => (
+            <React.Fragment key={c.id}>
+              <span style={{ color: "var(--fg-4)" }}>Connector</span>
+              <span className="t-mono">{c.name} <span style={{ color: "var(--fg-4)" }}>({c.platform})</span> <ZTNAStatusBadge status="online" size="sm"/></span>
+            </React.Fragment>
+          ))}
           <span style={{ color: "var(--fg-4)" }}>Last heartbeat</span><span style={{ color: "var(--fg-1)" }}>just now</span>
-          <span style={{ color: "var(--fg-4)" }}>Certificate</span><span style={{ color: "var(--fg-1)" }}>Valid until {connector ? new Date(connector.certExpiresAt).toLocaleDateString("en-US", { month: "short", year: "numeric" }) : "—"}</span>
+          <span style={{ color: "var(--fg-4)" }}>Certificate{connectors.length > 1 ? "s" : ""}</span><span style={{ color: "var(--fg-1)" }}>Valid until {first ? new Date(first.certExpiresAt).toLocaleDateString("en-US", { month: "short", year: "numeric" }) : "—"}</span>
         </div>
       </div>
 
@@ -1090,7 +1255,7 @@ const ZTNASetupFlow = () => {
   const isConfirmStep = (s.entry === "new-site" && s.step === 4) || (s.entry === "existing-site" && s.step === 3);
   const nextDisabled = (() => {
     if (s.entry === "new-site" && s.step === 1) return !s.siteDraft.name.trim();
-    if ((s.entry === "new-site" && s.step === 2) || (s.entry === "existing-site" && s.step === 1)) return !s.connectorDraft.name.trim();
+    if ((s.entry === "new-site" && s.step === 2) || (s.entry === "existing-site" && s.step === 1)) return s.connectorDrafts.some(d => !d.name.trim());
     return false;
   })();
 
@@ -1218,7 +1383,7 @@ const ZTNACertRenewPanel = () => {
 // SITE PICKER (Surface E · resource wizard)
 // Public API: <ZTNASitePicker value={siteId} onChange={fn} />
 // =========================================================
-const ZTNASitePicker = ({ value, onChange }) => {
+const ZTNASitePicker = ({ value, onChange, connectorId, onConnectorChange }) => {
   const store = window.useZtna();
   const sites = store.sites;
   if (sites.length === 0) {
@@ -1233,8 +1398,14 @@ const ZTNASitePicker = ({ value, onChange }) => {
     );
   }
   const selectedSite = sites.find(s => s.id === value);
+  const siteConns = selectedSite ? store.siteConnectors(selectedSite.id) : [];
+  const chosenConn = siteConns.find(c => c.id === connectorId);
+  const chosenOffline = chosenConn && store.connectorStatus(chosenConn) !== "online";
   return (
     <>
+      {/* Site change resets connectorId in the PARENT's onChange — do not also
+          call onConnectorChange here; it fires against the stale routing
+          object and clobbers the siteId that was just set. */}
       <select className="input" value={value || ""} onChange={e => onChange(e.target.value)}>
         <option value="">Which site is this resource behind?</option>
         {sites.map(s => {
@@ -1250,6 +1421,31 @@ const ZTNASitePicker = ({ value, onChange }) => {
       </select>
 
       {selectedSite && <ZTNASiteHealthCard siteId={selectedSite.id}/>}
+
+      {/* Preferred connector for THIS resource. Automatic is the default and
+          the recommended path — PAM load-balances and fails over within the
+          site. Pinning a specific connector is a preference: PAM still fails
+          over to other online connectors if the preferred one goes down. */}
+      {selectedSite && siteConns.length > 0 && onConnectorChange && (
+        <div style={{ marginTop: 10 }}>
+          <Field label="Preferred connector" hint="PAM routes this resource through the preferred connector when healthy, and fails over to other connectors in the site automatically.">
+            <select className="input" value={connectorId || ""} onChange={e => onConnectorChange(e.target.value)}>
+              <option value="">
+                Automatic — PAM picks a healthy connector{selectedSite.preferredConnectorId ? ` (site default: ${siteConns.find(c => c.id === selectedSite.preferredConnectorId)?.name || "—"})` : " (recommended)"}
+              </option>
+              {siteConns.map(c => {
+                const st = store.connectorStatus(c);
+                return <option key={c.id} value={c.id}>{ZTNA_STATUS[st]?.glyph || "●"} {c.name} · {c.platform} · {ZTNA_STATUS[st]?.label}</option>;
+              })}
+            </select>
+          </Field>
+          {chosenOffline && (
+            <div style={{ marginTop: 6, padding: 10, background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 4, font: "500 12px/1.5 var(--font-sans)" }}>
+              ⚠ {chosenConn.name} is currently {store.connectorStatus(chosenConn) === "offline" ? "offline" : "unhealthy"}. Sessions will fail over to other online connectors in {selectedSite.name} until it recovers.
+            </div>
+          )}
+        </div>
+      )}
     </>
   );
 };
@@ -1392,7 +1588,12 @@ const ZTNANetworkRoutingSection = ({ ipHint, resourceContext, value, onChange })
       {v.method === "ztna" && (
         <div style={{ marginTop: 4 }}>
           <div style={{ font: "500 12px/1.4 var(--font-sans)", color: "var(--fg-2)", marginBottom: 6 }}>Which site is this resource behind?</div>
-          <ZTNASitePicker value={v.siteId} onChange={siteId => onChange({ ...v, siteId })}/>
+          <ZTNASitePicker
+            value={v.siteId}
+            onChange={siteId => onChange({ ...v, siteId, connectorId: "" })}
+            connectorId={v.connectorId}
+            onConnectorChange={connectorId => onChange({ ...v, connectorId })}
+          />
         </div>
       )}
 
@@ -1766,6 +1967,7 @@ const ZTNADashboardSignals = () => {
 Object.assign(window, {
   ZTNAConnectorsPage,
   ZTNAController,
+  ZTNADeleteModal,
   ZTNATroubleshootPanel,
   ZTNARoutingRow,
   ZTNAResourceBanner,
