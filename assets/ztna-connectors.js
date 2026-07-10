@@ -503,19 +503,30 @@ const ZTNASiteCard = ({ site }) => {
   const onlineCount = conns.filter(c => store.connectorStatus(c) === "online").length;
   const totalCount  = conns.length;
   const accent = status === "online" ? "var(--success-fg)" : status === "offline" ? "var(--danger-fg)" : status === "not-enrolled" ? "var(--fg-4)" : "var(--warning-fg)";
+  // Sites with problems start expanded — the admin needs to see what's wrong.
+  // Healthy sites start collapsed to keep the page scannable.
+  const [expanded, setExpanded] = React.useState(status !== "online");
 
   return (
     <div className="card" style={{ borderLeft: `3px solid ${accent}`, padding: 16, marginBottom: 14 }}>
-      {/* Card header */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-        <button onClick={() => window.ztnaStore.openSiteDetail(site.id)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", font: "700 15px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>{site.name}</button>
+      {/* Card header — click anywhere to toggle; site name opens detail */}
+      <div onClick={() => setExpanded(e => !e)} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: expanded ? 14 : 0, cursor: "pointer" }}>
+        <Icon name={expanded ? "chevron-down" : "chevron-right"} size={14} color="var(--fg-4)"/>
+        <button onClick={e => { e.stopPropagation(); window.ztnaStore.openSiteDetail(site.id); }} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", font: "700 15px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>{site.name}</button>
         <span style={{ padding: "1px 7px", background: "var(--bg-surface-2)", color: "var(--fg-3)", borderRadius: 4, font: "500 10.5px/1.4 var(--font-sans)" }}>{site.environment}</span>
         <ZTNAStatusBadge status={status}/>
         {status === "partial" && <span className="t-tiny" style={{ color: "var(--warning-fg)", fontWeight: 500 }}>{onlineCount}/{totalCount} connectors online</span>}
+        {!expanded && (
+          <span className="t-tiny" style={{ color: "var(--fg-4)" }}>
+            {totalCount} connector{totalCount === 1 ? "" : "s"} · {assigned.length} resource{assigned.length === 1 ? "" : "s"}{site.region ? ` · ${site.region}` : ""}
+          </span>
+        )}
         <div style={{ flex: 1 }}/>
-        <button className="btn btn-sm" onClick={() => window.ztnaStore.openSiteDetail(site.id)}><Icon name="edit" size={12}/></button>
-        <button className="btn btn-sm" onClick={() => window.ztnaStore.openSetupExistingSite(site.id)}>+ Add connector</button>
+        <button className="btn btn-sm" onClick={e => { e.stopPropagation(); window.ztnaStore.openSiteDetail(site.id); }}><Icon name="edit" size={12}/></button>
+        <button className="btn btn-sm" onClick={e => { e.stopPropagation(); window.ztnaStore.openSetupExistingSite(site.id); }}>+ Add connector</button>
       </div>
+
+      {expanded && <>
 
       {/* All-offline banner */}
       {status === "offline" && (
@@ -533,7 +544,7 @@ const ZTNASiteCard = ({ site }) => {
             <div style={{ padding: 12, background: "var(--bg-surface-2)", borderRadius: 6, textAlign: "center" }}>
               <div style={{ font: "500 12.5px/1.4 var(--font-sans)", color: "var(--fg-2)" }}>No connectors deployed</div>
               <div style={{ font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)", margin: "4px 0 8px" }}>Resources assigned here cannot be reached.</div>
-              <button className="btn btn-sm btn-primary" onClick={() => window.ztnaStore.openSetupNewSite()}>+ Add connector</button>
+              <button className="btn btn-sm btn-primary" onClick={() => window.ztnaStore.openSetupExistingSite(site.id)}>+ Add connector</button>
             </div>
           ) : conns.map(c => <ZTNAConnectorRow key={c.id} c={c}/>)}
         </div>
@@ -573,6 +584,7 @@ const ZTNASiteCard = ({ site }) => {
         <span>·</span>
         <span>Last active: {conns.length ? store.fmtHeartbeat(conns.reduce((a, b) => a.lastHeartbeatMs > b.lastHeartbeatMs ? a : b)) : "—"}</span>
       </div>
+      </>}
     </div>
   );
 };
@@ -701,9 +713,9 @@ const ZTNAConnectorsPage = () => {
       <PageHeader
         title="ZTNA Connectors"
         description="Connect PAM to private networks without opening inbound ports. Deploy connectors inside your network — they dial out to PAM."
-        action={!isEmpty && (
+        actions={!isEmpty && (
           <button className="btn btn-primary" onClick={() => window.ztnaStore.openSetupNewSite()}>
-            + Add site
+            <Icon name="plus" size={13}/> Add site
           </button>
         )}
       />
@@ -1089,36 +1101,44 @@ const ZTNASetupFlow = () => {
     window.ztnaStore.setupNext();
   };
 
+  // Right-side drawer — same treatment as the Resources and Credentials add
+  // panels (backdrop + 960px slide-in), not a full-page takeover. Closing by
+  // backdrop click is intentionally allowed except while a token is live on
+  // screen — there, "I'll deploy this later" is the explicit exit.
+  const backdropClose = () => { if (!isDeployStep) window.ztnaStore.close(); };
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 250, background: "var(--bg-app)", display: "flex", flexDirection: "column" }}>
-      {/* Chrome header */}
-      <div style={{ padding: "14px 32px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 12, background: "#fff" }}>
-        <div style={{ width: 32, height: 32, borderRadius: 6, background: "var(--brand-soft)", color: "var(--brand-fg)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
-          <Icon name="globe" size={16} color="var(--brand-fg)"/>
-        </div>
-        <div style={{ flex: 1 }}>
-          <div style={{ font: "700 14px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>ZTNA connector setup</div>
-          <div style={{ font: "400 12px/1.3 var(--font-sans)", color: "var(--fg-4)", marginTop: 2 }}>{s.entry === "new-site" ? "Setting up a new site + connector" : `Adding a connector to ${siteName}`}</div>
-        </div>
-        <button className="btn btn-ghost btn-icon" onClick={() => window.ztnaStore.close()} aria-label="Close"><Icon name="x" size={14}/></button>
-      </div>
-
-      <ZTNAStepIndicator entry={s.entry} step={s.step}/>
-
-      <div className="scroll-area" style={{ flex: 1, overflow: "auto" }}>
-        {body}
-      </div>
-
-      {!isDeployStep && !isConfirmStep && (
-        <div style={{ padding: "14px 32px", borderTop: "1px solid var(--border)", display: "flex", gap: 8, background: "#fff" }}>
-          <button className="btn btn-ghost" onClick={() => window.ztnaStore.close()}>Cancel</button>
+    <div onClick={backdropClose} style={{ position: "fixed", inset: 0, zIndex: 100, background: "rgba(15, 23, 42, 0.45)", display: "flex", justifyContent: "flex-end", animation: "fadeIn 180ms ease" }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: "min(960px, 92vw)", height: "100%", background: "var(--bg-app)", display: "flex", flexDirection: "column", boxShadow: "-8px 0 32px rgba(0,0,0,0.18)", animation: "slideInR 240ms cubic-bezier(.2,.7,.2,1)" }}>
+        {/* Drawer header */}
+        <header style={{ height: 56, padding: "0 24px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 10, flex: "none" }}>
+          <div style={{ width: 28, height: 28, borderRadius: 6, background: "var(--brand-soft)", color: "var(--brand-fg)", display: "flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
+            <Icon name="globe" size={14} color="var(--brand-fg)"/>
+          </div>
+          <div>
+            <h2 style={{ font: "600 15px/1 var(--font-sans)", color: "var(--fg-1)", margin: 0 }}>{s.entry === "new-site" ? "Add site" : "Add connector"}</h2>
+            <div style={{ font: "400 11.5px/1.3 var(--font-sans)", color: "var(--fg-4)", marginTop: 3 }}>{s.entry === "new-site" ? "New site + connector" : `Site: ${siteName}`}</div>
+          </div>
           <div style={{ flex: 1 }}/>
-          {s.step > 1 && <button className="btn" onClick={() => window.ztnaStore.setupBack()}>← Back</button>}
-          <button className="btn btn-primary" disabled={nextDisabled} onClick={onNext} style={nextDisabled ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
-            {(s.entry === "new-site" && s.step === 2) || (s.entry === "existing-site" && s.step === 1) ? "Generate enrollment token →" : "Next →"}
-          </button>
+          <button className="btn btn-ghost btn-sm btn-icon" onClick={() => window.ztnaStore.close()} title="Close"><Icon name="close" size={14}/></button>
+        </header>
+
+        <ZTNAStepIndicator entry={s.entry} step={s.step}/>
+
+        <div className="scroll-area" style={{ flex: 1, overflow: "auto" }}>
+          {body}
         </div>
-      )}
+
+        {!isDeployStep && !isConfirmStep && (
+          <footer style={{ padding: "12px 24px", borderTop: "1px solid var(--border)", display: "flex", gap: 8, background: "var(--bg-surface)", flex: "none" }}>
+            <button className="btn btn-ghost" onClick={() => window.ztnaStore.close()}>Cancel</button>
+            <div style={{ flex: 1 }}/>
+            {s.step > 1 && <button className="btn" onClick={() => window.ztnaStore.setupBack()}>← Back</button>}
+            <button className="btn btn-primary" disabled={nextDisabled} onClick={onNext} style={nextDisabled ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
+              {(s.entry === "new-site" && s.step === 2) || (s.entry === "existing-site" && s.step === 1) ? "Generate enrollment token →" : "Next →"}
+            </button>
+          </footer>
+        )}
+      </div>
     </div>
   );
 };
