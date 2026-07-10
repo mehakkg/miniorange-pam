@@ -768,11 +768,13 @@ const NewStep1RootCred = ({ data, setData }) => {
         </div>
       </div>
 
-      {/* Network routing — ZTNA site picker with private-IP auto-detect */}
+      {/* Network routing — ZTNA site picker with private-IP auto-detect,
+          plus jump-server double-hop with its own credential block */}
       <div>
         {window.ZTNANetworkRoutingSection && (
           <ZTNANetworkRoutingSection
             ipHint={data.host}
+            resourceContext={{ type: data.type, port: data.port }}
             value={data.routing}
             onChange={(v) => patch("routing", v)}
           />
@@ -781,9 +783,18 @@ const NewStep1RootCred = ({ data, setData }) => {
 
       <div>
         <div style={{ font: "600 11px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 12 }}>Root credential</div>
-        <HelperCallout>
-          <strong>This is the only credential you need to provide manually.</strong> PAM will configure rotation, admin account mapping, and access level from this in the next step.
-        </HelperCallout>
+        {/* "Only credential" is true for direct and ZTNA (single hop). A jump
+            server is a double-hop with a second credential above, so the copy
+            must not contradict the block the admin just filled in. */}
+        {data.routing?.method === "jump" ? (
+          <HelperCallout>
+            <strong>PAM will use this credential to reach the resource once connected through the jump host above.</strong> PAM will configure rotation, admin account mapping, and access level from this in the next step.
+          </HelperCallout>
+        ) : (
+          <HelperCallout>
+            <strong>This is the only credential you need to provide manually.</strong> PAM will configure rotation, admin account mapping, and access level from this in the next step.
+          </HelperCallout>
+        )}
         <div style={{ marginTop: 14 }}>
           <CredentialSourcePicker
             value={data.credentialSource}
@@ -1311,7 +1322,8 @@ const NewManualAdd = ({ onClose, onCreated }) => {
     { n: 2, label: "Review PAM configuration" },
     { n: 3, label: "Confirm" },
   ];
-  const step1Valid = data.name && data.host && credentialSourceValid(data.credentialSource);
+  const step1Valid = data.name && data.host && credentialSourceValid(data.credentialSource)
+    && (!window.ztnaJumpValid || window.ztnaJumpValid(data.routing));
   const canProceed = step === 1 ? step1Valid : true;
 
   const confirmClose = () => {

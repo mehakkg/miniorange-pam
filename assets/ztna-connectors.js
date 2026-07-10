@@ -1299,13 +1299,61 @@ const ZTNASiteHealthCard = ({ siteId }) => {
 
 // =========================================================
 // NETWORK ROUTING SECTION — the block dropped into the resource wizard.
-// Usage: <ZTNANetworkRoutingSection ipHint={"10.42.18.7"} value={draft.routing} onChange={patch => set(...)}/>
+// Usage: <ZTNANetworkRoutingSection ipHint={host} resourceContext={{type, port}} value={draft.routing} onChange={...}/>
+//
+// Three routing modes. Jump server is a distinct trust model from ZTNA —
+// customer-owned bastion vs PAM-owned connector — so it is a peer pill,
+// not a sub-option. Selecting it reveals a JUMP HOST CREDENTIAL block
+// (the second credential the double-hop genuinely requires) directly
+// below this section, before the Root Credential block.
+//
+// BACKEND DEPENDENCY (flagged in spec as open items — confirm with Mohit):
+//   1. End-to-end double-hop support per protocol/resource type.
+//   2. Whether jump-host protocol compatibility can be checked live; the
+//      warning below is a static heuristic (SSH bastion + RDP target).
+//   3. Whether session recording covers the full jump-host→target path
+//      or only the final hop.
 // =========================================================
 const ZTNA_PRIVATE_IP = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
-const ZTNANetworkRoutingSection = ({ ipHint, value, onChange }) => {
-  // Value shape: { method: "direct" | "ztna", siteId }
-  const v = value || { method: "direct", siteId: "" };
+
+// Empty jump-credential draft. mode: "new" | "existing".
+const ZTNA_EMPTY_JUMP = { mode: "new", host: "", port: 22, username: "", credType: "password", secret: "", existingId: null };
+
+// Validity check for the jump credential — exposed on window so the
+// wizard's step gate (NewManualAdd.step1Valid) can call it without
+// importing anything.
+const ztnaJumpValid = (routing) => {
+  if (!routing || routing.method !== "jump") return true;
+  const j = routing.jump || {};
+  if (j.mode === "existing") return !!j.existingId;
+  return !!(j.host && j.port && j.username && j.secret);
+};
+window.ztnaJumpValid = ztnaJumpValid;
+
+// Static protocol heuristic: an SSH bastion (port 22 or SSH-key auth)
+// cannot natively proxy an RDP target (port 3389). PAM can't see the
+// bastion's real forwarding config, so this warns rather than blocks.
+const ztnaJumpProtocolConflict = (jump, resourceContext) => {
+  if (!jump || !resourceContext) return null;
+  const jumpIsSsh = jump.credType === "sshkey" || +jump.port === 22;
+  const targetIsRdp = +resourceContext.port === 3389;
+  if (jumpIsSsh && targetIsRdp) return "Windows/RDP";
+  return null;
+};
+
+const ZTNANetworkRoutingSection = ({ ipHint, resourceContext, value, onChange }) => {
+  // Value shape: { method: "direct" | "ztna" | "jump", siteId, jump }
+  const v = value || { method: "direct", siteId: "", jump: null };
   const isPrivate = ipHint && ZTNA_PRIVATE_IP.test(ipHint);
+  const jump = v.jump || ZTNA_EMPTY_JUMP;
+  const setJump = (patch) => onChange({ ...v, jump: { ...jump, ...patch } });
+  const conflict = v.method === "jump" ? ztnaJumpProtocolConflict(jump, resourceContext) : null;
+
+  // Vaulted credentials usable for a bastion login — Password or SSH Key only.
+  const [q, setQ] = React.useState("");
+  const vaulted = (window.CREDS || []).filter(c => (c.type === "Password" || c.type === "SSH Key") &&
+    (!q || `${c.display} ${c.username} ${c.resource || ""}`.toLowerCase().includes(q.toLowerCase())));
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7 }}>Network routing</div>
@@ -1320,14 +1368,15 @@ const ZTNANetworkRoutingSection = ({ ipHint, value, onChange }) => {
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
         {[
-          { v: "direct", label: "Direct",           hint: "PAM reaches resource without connector" },
-          { v: "ztna",   label: "Via ZTNA connector", hint: "PAM routes through a connector inside a private network" },
+          { v: "direct", label: "Direct",             hint: "PAM reaches resource without connector" },
+          { v: "ztna",   label: "Via ZTNA connector",  hint: "PAM routes through a connector inside a private network" },
+          { v: "jump",   label: "Via jump server",     hint: "PAM authenticates through a bastion host you already manage, then reaches the resource from there" },
         ].map(o => {
           const sel = v.method === o.v;
           return (
-            <button key={o.v} onClick={() => onChange({ ...v, method: o.v })} style={{
+            <button key={o.v} onClick={() => onChange({ ...v, method: o.v, jump: o.v === "jump" ? (v.jump || ZTNA_EMPTY_JUMP) : v.jump })} style={{
               padding: 12, border: `1.5px solid ${sel ? "var(--brand-fg)" : "var(--border)"}`,
               background: sel ? "var(--brand-soft)" : "#fff",
               textAlign: "left", borderRadius: 6, cursor: "pointer",
@@ -1344,6 +1393,110 @@ const ZTNANetworkRoutingSection = ({ ipHint, value, onChange }) => {
         <div style={{ marginTop: 4 }}>
           <div style={{ font: "500 12px/1.4 var(--font-sans)", color: "var(--fg-2)", marginBottom: 6 }}>Which site is this resource behind?</div>
           <ZTNASitePicker value={v.siteId} onChange={siteId => onChange({ ...v, siteId })}/>
+        </div>
+      )}
+
+      {v.method === "jump" && (
+        <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ font: "600 10.5px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.7 }}>Jump host credential</div>
+          <div style={{ padding: 10, background: "var(--brand-soft)", color: "var(--brand-fg)", borderLeft: "3px solid var(--brand-fg)", borderRadius: "0 4px 4px 0", font: "500 12px/1.5 var(--font-sans)" }}>
+            PAM will authenticate into this jump host first, then use the root credential below to reach the resource.
+          </div>
+
+          {/* Create new / Use existing — mirrors the Root Credential picker's split */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            {[
+              { m: "new",      label: "Create new",   hint: "Enter the bastion's connection details" },
+              { m: "existing", label: "Use existing",  hint: "Pick an already-vaulted credential" },
+            ].map(o => {
+              const sel = jump.mode === o.m;
+              return (
+                <button key={o.m} onClick={() => setJump({ mode: o.m })} style={{
+                  padding: 10, border: `1.5px solid ${sel ? "var(--brand-fg)" : "var(--border)"}`,
+                  background: sel ? "var(--brand-soft)" : "#fff",
+                  textAlign: "left", borderRadius: 6, cursor: "pointer",
+                  display: "flex", flexDirection: "column", gap: 3,
+                }}>
+                  <span style={{ font: `${sel ? 700 : 600} 12.5px/1 var(--font-sans)`, color: sel ? "var(--brand-fg)" : "var(--fg-1)" }}>{o.label}</span>
+                  <span style={{ font: "400 11px/1.4 var(--font-sans)", color: "var(--fg-3)" }}>{o.hint}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {jump.mode === "new" ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12 }}>
+                <Field label="Jump host / IP" required>
+                  <input className="input t-mono" value={jump.host} onChange={e => setJump({ host: e.target.value })} placeholder="e.g. bastion.internal or 10.0.0.5"/>
+                </Field>
+                <Field label="Port" required>
+                  <input className="input t-mono" type="number" value={jump.port} onChange={e => setJump({ port: +e.target.value })}/>
+                </Field>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <Field label="Username" required>
+                  <input className="input" value={jump.username} onChange={e => setJump({ username: e.target.value })} placeholder="e.g. pam-svc"/>
+                </Field>
+                <Field label="Credential type" required>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                    {[{ t: "password", label: "Password" }, { t: "sshkey", label: "SSH Key" }].map(o => {
+                      const sel = jump.credType === o.t;
+                      return (
+                        <button key={o.t} onClick={() => setJump({ credType: o.t, port: o.t === "sshkey" ? 22 : jump.port })} style={{
+                          padding: "9px 8px", border: `1.5px solid ${sel ? "var(--brand-fg)" : "var(--border)"}`,
+                          background: sel ? "var(--brand-soft)" : "#fff",
+                          color: sel ? "var(--brand-fg)" : "var(--fg-2)",
+                          font: `${sel ? 700 : 500} 12px/1 var(--font-sans)`,
+                          borderRadius: 6, cursor: "pointer",
+                        }}>{o.label}</button>
+                      );
+                    })}
+                  </div>
+                </Field>
+              </div>
+              <Field label={jump.credType === "sshkey" ? "Private key" : "Password"} required>
+                {jump.credType === "sshkey"
+                  ? <textarea className="input t-mono" rows={3} value={jump.secret} onChange={e => setJump({ secret: e.target.value })} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"/>
+                  : <input className="input" type="password" value={jump.secret} onChange={e => setJump({ secret: e.target.value })} placeholder="••••••••••••"/>}
+              </Field>
+            </div>
+          ) : (
+            <div>
+              <input className="input" value={q} onChange={e => setQ(e.target.value)} placeholder="Search vaulted credentials…"/>
+              <div style={{ marginTop: 8, border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden", maxHeight: 200, overflowY: "auto" }}>
+                {vaulted.length === 0 ? (
+                  <div style={{ padding: 14, font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-4)", textAlign: "center" }}>
+                    No vaulted Password or SSH Key credentials match. Bastion logins must be one of those two types.
+                  </div>
+                ) : vaulted.slice(0, 8).map(c => {
+                  const sel = jump.existingId === c.id;
+                  return (
+                    <button key={c.id} onClick={() => setJump({ existingId: c.id })} style={{
+                      display: "flex", alignItems: "center", gap: 10, width: "100%",
+                      padding: "9px 12px", border: "none", borderBottom: "1px solid var(--border-subtle)",
+                      background: sel ? "var(--brand-soft)" : "transparent", cursor: "pointer", textAlign: "left",
+                    }}>
+                      <Icon name={c.type === "SSH Key" ? "key" : "lock"} size={13} color="var(--fg-3)"/>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div className="t-mono" style={{ font: "500 12.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{c.display}</div>
+                        <div className="t-tiny" style={{ color: "var(--fg-4)" }}>{c.type} · {c.username}{c.resource ? ` · ${c.resource}` : ""}</div>
+                      </div>
+                      {sel && <Icon name="check" size={13} color="var(--brand-fg)"/>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Protocol compatibility — warning, never a block. PAM can't see
+              the bastion's real forwarding config. */}
+          {conflict && (
+            <div style={{ padding: 10, background: "var(--warning-soft)", color: "var(--warning-fg)", borderLeft: "3px solid var(--warning-fg)", borderRadius: "0 4px 4px 0", font: "500 12px/1.5 var(--font-sans)" }}>
+              ⚠ This jump host may not support proxying to a {conflict} target. Confirm your bastion supports protocol forwarding for this resource type before continuing.
+            </div>
+          )}
         </div>
       )}
     </div>
