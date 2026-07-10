@@ -24,9 +24,9 @@ const ZTNA_CERT_EXPIRING_DAYS  = 30;
 
   const store = {
     sites: [
-      { id: "site-mumbai",    name: "AWS Mumbai VPC",       environment: "AWS",     region: "ap-south-1",  description: "Primary APAC region — ledger + auth + reporting DBs live here.", createdAt: now - 45 * 86400000, preferredConnectorId: "conn-mumbai-1" },
-      { id: "site-frankfurt", name: "On-prem Frankfurt DC", environment: "On-prem", region: "eu-central-1", description: "European data-residency workloads.", createdAt: now - 21 * 86400000, preferredConnectorId: null },
-      { id: "site-tokyo",     name: "Azure Tokyo",          environment: "Azure",   region: "japaneast",    description: "Recently added — no connector deployed yet.",                  createdAt: now - 2 * 86400000, preferredConnectorId: null },
+      { id: "site-mumbai",    name: "AWS Mumbai VPC",       environment: "AWS",     region: "ap-south-1",  description: "Primary APAC region — ledger + auth + reporting DBs live here.", createdAt: now - 45 * 86400000, preferredConnectorId: "conn-mumbai-1", selectionPolicy: "first-available", maxStreams: 500 },
+      { id: "site-frankfurt", name: "On-prem Frankfurt DC", environment: "On-prem", region: "eu-central-1", description: "European data-residency workloads.", createdAt: now - 21 * 86400000, preferredConnectorId: null, selectionPolicy: "least-loaded", maxStreams: 250 },
+      { id: "site-tokyo",     name: "Azure Tokyo",          environment: "Azure",   region: "japaneast",    description: "Recently added — no connector deployed yet.",                  createdAt: now - 2 * 86400000, preferredConnectorId: null, selectionPolicy: "first-available", maxStreams: 500 },
     ],
 
     connectors: [
@@ -88,13 +88,15 @@ const ZTNA_CERT_EXPIRING_DAYS  = 30;
     //   openSetupNewSite()          — full 4-step flow, starting at Create site
     //   openSetupExistingSite(id)   — 3-step flow (Configure → Deploy → Confirm) for an already-created site
     openSetupNewSite: () => {
-      store.setup = { entry: "new-site", step: 1, siteDraft: { name: "", environment: "AWS", region: "", description: "" }, connectorDrafts: [{ name: "", platform: "Linux" }], heartbeatSec: 60, certMonths: 12, deployments: null, status: "idle" };
+      store.setup = { entry: "new-site", step: 1, siteDraft: { name: "", environment: "AWS", region: "", description: "" }, connectorDrafts: [{ name: "", platform: "Linux" }], heartbeatSec: 60, certMonths: 12, maxStreams: 500, selectionPolicy: "first-available", deployments: null, status: "idle" };
       store.open = "setup-flow";
       store.emit();
     },
     openSetupExistingSite: (siteId) => {
       const site = store.sites.find(s => s.id === siteId);
-      store.setup = { entry: "existing-site", step: 1, siteId, siteDraft: site, connectorDrafts: [{ name: "", platform: "Linux" }], heartbeatSec: 60, certMonths: 12, deployments: null, status: "idle" };
+      // Existing site: routing settings initialize from the site's current
+      // values — editing them here updates the site on token generation.
+      store.setup = { entry: "existing-site", step: 1, siteId, siteDraft: site, connectorDrafts: [{ name: "", platform: "Linux" }], heartbeatSec: 60, certMonths: 12, maxStreams: site?.maxStreams ?? 500, selectionPolicy: site?.selectionPolicy || "first-available", deployments: null, status: "idle" };
       store.open = "setup-flow";
       store.emit();
     },
@@ -128,7 +130,10 @@ const ZTNA_CERT_EXPIRING_DAYS  = 30;
       let siteId = s.siteId;
       if (s.entry === "new-site" && !siteId) {
         siteId = "site-" + Math.random().toString(36).slice(2, 8);
-        store.sites = [...store.sites, { id: siteId, name: s.siteDraft.name, environment: s.siteDraft.environment, region: s.siteDraft.region, description: s.siteDraft.description, createdAt: now, preferredConnectorId: null }];
+        store.sites = [...store.sites, { id: siteId, name: s.siteDraft.name, environment: s.siteDraft.environment, region: s.siteDraft.region, description: s.siteDraft.description, createdAt: now, preferredConnectorId: null, selectionPolicy: s.selectionPolicy, maxStreams: s.maxStreams }];
+      } else {
+        // Existing site: apply any routing-setting edits made in this run.
+        store.sites = store.sites.map(ss => ss.id === siteId ? { ...ss, selectionPolicy: s.selectionPolicy, maxStreams: s.maxStreams } : ss);
       }
       const deployments = s.connectorDrafts.map(d => {
         const connectorId = "conn-" + Math.random().toString(36).slice(2, 8);
@@ -213,6 +218,14 @@ const ZTNA_CERT_EXPIRING_DAYS  = 30;
     },
     setSitePreferredConnector: (siteId, connId) => {
       store.sites = store.sites.map(s => s.id === siteId ? { ...s, preferredConnectorId: connId || null } : s);
+      store.emit();
+    },
+    setSiteSelectionPolicy: (siteId, policy) => {
+      store.sites = store.sites.map(s => s.id === siteId ? { ...s, selectionPolicy: policy } : s);
+      store.emit();
+    },
+    setSiteMaxStreams: (siteId, n) => {
+      store.sites = store.sites.map(s => s.id === siteId ? { ...s, maxStreams: Math.max(1, +n || 1) } : s);
       store.emit();
     },
     // Certificate renewal simulation
@@ -335,6 +348,16 @@ const ZTNADot = ({ status, size = 8 }) => {
   const s = ZTNA_STATUS[status] || ZTNA_STATUS["not-enrolled"];
   return <span style={{ width: size, height: size, borderRadius: "50%", background: s.dot, display: "inline-block", flex: "none" }}/>;
 };
+
+// Connector selection policies — how PAM picks a connector within a site.
+// "exact-connector" changes the resource wizard's contract: every resource
+// assigned to the site must pin one connector, and there is no failover.
+const ZTNA_POLICIES = [
+  { v: "first-available", label: "First available",  hint: "Route through the first healthy connector, in priority order." },
+  { v: "least-loaded",    label: "Least loaded",     hint: "Route through the connector with the fewest active streams." },
+  { v: "exact-connector", label: "Exact connector",  hint: "Each resource pins one connector — chosen when the resource is created. No automatic failover." },
+];
+const ztnaPolicyLabel = (v) => (ZTNA_POLICIES.find(p => p.v === v) || ZTNA_POLICIES[0]).label;
 
 // Delete confirmation — consequence-forward, red only on the commit button.
 // `consequence` is the line that spells out what breaks; keep it specific
@@ -468,6 +491,8 @@ const ZTNASiteDetailPanel = () => {
               <span style={{ color: "var(--fg-4)" }}>Region</span><span style={{ color: "var(--fg-1)" }}>{site.region || "—"}</span>
               <span style={{ color: "var(--fg-4)" }}>Created</span><span style={{ color: "var(--fg-1)" }}>{new Date(site.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>
               <span style={{ color: "var(--fg-4)" }}>Resources</span><span style={{ color: "var(--fg-1)" }}>{resCount}</span>
+              <span style={{ color: "var(--fg-4)" }}>Selection policy</span><span style={{ color: "var(--fg-1)" }}>{ztnaPolicyLabel(site.selectionPolicy)}</span>
+              <span style={{ color: "var(--fg-4)" }}>Max streams / connector</span><span style={{ color: "var(--fg-1)" }}>{site.maxStreams ?? 500}</span>
             </div>
             {site.description && (
               <div style={{ marginTop: 12, padding: 10, background: "var(--bg-surface-2)", borderRadius: 6, font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-2)" }}>
@@ -488,19 +513,36 @@ const ZTNASiteDetailPanel = () => {
               </div>
             ) : <>
               {conns.map(c => <ZTNAConnectorRow key={c.id} c={c} compact/>)}
-              {/* Preferred connector — site-level setting. PAM routes new
-                  sessions through the preferred connector when healthy and
-                  fails over to any other online connector when not. */}
-              <div style={{ marginTop: 10 }}>
-                <Field label="Preferred connector" hint="PAM routes through this connector when healthy, and fails over to others in the site automatically.">
-                  <select className="input" value={site.preferredConnectorId || ""} onChange={e => window.ztnaStore.setSitePreferredConnector(site.id, e.target.value)}>
-                    <option value="">Automatic — PAM picks a healthy connector</option>
-                    {conns.map(c => {
-                      const st = store.connectorStatus(c);
-                      return <option key={c.id} value={c.id}>{ZTNA_STATUS[st]?.glyph || "●"} {c.name} · {ZTNA_STATUS[st]?.label}</option>;
-                    })}
+              {/* Routing settings — selection policy, stream cap, preferred
+                  connector. Preferred only applies under first-available;
+                  exact-connector pins per-resource so it is hidden there. */}
+              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 12 }}>
+                <Field label="Default selection policy" hint="How PAM chooses a connector for each session on this site.">
+                  <select className="input" value={site.selectionPolicy || "first-available"} onChange={e => window.ztnaStore.setSiteSelectionPolicy(site.id, e.target.value)}>
+                    {ZTNA_POLICIES.map(p => <option key={p.v} value={p.v}>{p.label} — {p.hint}</option>)}
                   </select>
                 </Field>
+                <Field label="Maximum streams per connector" hint="Cap on concurrent session tunnels per connector.">
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input className="input" type="number" min={1} value={site.maxStreams ?? 500} onChange={e => window.ztnaStore.setSiteMaxStreams(site.id, e.target.value)} style={{ width: 100 }}/>
+                    <span style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-3)" }}>streams</span>
+                  </div>
+                </Field>
+                {site.selectionPolicy === "exact-connector" ? (
+                  <div style={{ padding: 10, background: "var(--bg-surface-2)", borderRadius: 6, font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)" }}>
+                    Exact connector policy — each resource pins its own connector in the Add Resource wizard, so there is no site-level preferred connector.
+                  </div>
+                ) : (
+                  <Field label="Preferred connector" hint="PAM routes through this connector when healthy, and fails over to others in the site automatically.">
+                    <select className="input" value={site.preferredConnectorId || ""} onChange={e => window.ztnaStore.setSitePreferredConnector(site.id, e.target.value)}>
+                      <option value="">Automatic — PAM picks a healthy connector</option>
+                      {conns.map(c => {
+                        const st = store.connectorStatus(c);
+                        return <option key={c.id} value={c.id}>{ZTNA_STATUS[st]?.glyph || "●"} {c.name} · {ZTNA_STATUS[st]?.label}</option>;
+                      })}
+                    </select>
+                  </Field>
+                )}
               </div>
             </>}
           </section>
@@ -730,6 +772,8 @@ const ZTNASiteCard = ({ site }) => {
         <span>Created {new Date(site.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>
         <span>·</span>
         <span>Region: {site.region || "—"}</span>
+        <span>·</span>
+        <span>Policy: {ztnaPolicyLabel(site.selectionPolicy)}</span>
         <span>·</span>
         <span>Last active: {conns.length ? store.fmtHeartbeat(conns.reduce((a, b) => a.lastHeartbeatMs > b.lastHeartbeatMs ? a : b)) : "—"}</span>
       </div>
@@ -1052,7 +1096,37 @@ const ZTNASetupConfigureConnector = ({ s, siteName }) => (
           <span style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-3)" }}>months</span>
         </div>
       </Field>
+      <Field label="Maximum streams per connector" hint="Cap on concurrent session tunnels each connector carries. New sessions queue or shift to another connector at the cap.">
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input className="input" type="number" min={1} value={s.maxStreams} onChange={e => window.ztnaStore.setupUpdate({ maxStreams: Math.max(1, +e.target.value || 1) })} style={{ width: 100 }}/>
+          <span style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-3)" }}>streams</span>
+        </div>
+      </Field>
     </div>
+
+    {/* Selection policy — how PAM picks among this site's connectors */}
+    <Field label="Default selection policy" hint="How PAM chooses a connector for each session on this site.">
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+        {ZTNA_POLICIES.map(p => {
+          const sel = s.selectionPolicy === p.v;
+          return (
+            <button key={p.v} onClick={() => window.ztnaStore.setupUpdate({ selectionPolicy: p.v })} style={{
+              padding: 12, border: `1.5px solid ${sel ? "var(--brand-fg)" : "var(--border)"}`,
+              background: sel ? "var(--brand-soft)" : "#fff", textAlign: "left",
+              borderRadius: 8, cursor: "pointer", display: "flex", flexDirection: "column", gap: 4,
+            }}>
+              <span style={{ font: `${sel ? 700 : 600} 12.5px/1 var(--font-sans)`, color: sel ? "var(--brand-fg)" : "var(--fg-1)" }}>{p.label}</span>
+              <span style={{ font: "400 11px/1.4 var(--font-sans)", color: "var(--fg-3)" }}>{p.hint}</span>
+            </button>
+          );
+        })}
+      </div>
+    </Field>
+    {s.selectionPolicy === "exact-connector" && (
+      <div style={{ padding: 10, background: "var(--brand-soft)", color: "var(--brand-fg)", borderLeft: "3px solid var(--brand-fg)", borderRadius: "0 4px 4px 0", font: "500 12px/1.5 var(--font-sans)" }}>
+        With Exact connector, every resource assigned to this site must pin one specific connector — you'll pick it in the Add Resource wizard. Sessions do not fail over if that connector goes offline.
+      </div>
+    )}
   </div>
 );
 
@@ -1422,30 +1496,50 @@ const ZTNASitePicker = ({ value, onChange, connectorId, onConnectorChange }) => 
 
       {selectedSite && <ZTNASiteHealthCard siteId={selectedSite.id}/>}
 
-      {/* Preferred connector for THIS resource. Automatic is the default and
-          the recommended path — PAM load-balances and fails over within the
-          site. Pinning a specific connector is a preference: PAM still fails
-          over to other online connectors if the preferred one goes down. */}
-      {selectedSite && siteConns.length > 0 && onConnectorChange && (
-        <div style={{ marginTop: 10 }}>
-          <Field label="Preferred connector" hint="PAM routes this resource through the preferred connector when healthy, and fails over to other connectors in the site automatically.">
-            <select className="input" value={connectorId || ""} onChange={e => onConnectorChange(e.target.value)}>
-              <option value="">
-                Automatic — PAM picks a healthy connector{selectedSite.preferredConnectorId ? ` (site default: ${siteConns.find(c => c.id === selectedSite.preferredConnectorId)?.name || "—"})` : " (recommended)"}
-              </option>
-              {siteConns.map(c => {
-                const st = store.connectorStatus(c);
-                return <option key={c.id} value={c.id}>{ZTNA_STATUS[st]?.glyph || "●"} {c.name} · {c.platform} · {ZTNA_STATUS[st]?.label}</option>;
-              })}
-            </select>
-          </Field>
-          {chosenOffline && (
-            <div style={{ marginTop: 6, padding: 10, background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 4, font: "500 12px/1.5 var(--font-sans)" }}>
-              ⚠ {chosenConn.name} is currently {store.connectorStatus(chosenConn) === "offline" ? "offline" : "unhealthy"}. Sessions will fail over to other online connectors in {selectedSite.name} until it recovers.
+      {/* Connector choice for THIS resource — behavior depends on the site's
+          selection policy:
+            first-available / least-loaded → OPTIONAL preference; PAM still
+              fails over within the site.
+            exact-connector → REQUIRED pin; no Automatic option, no failover.
+          The wizard's step gate calls ztnaRoutingValid() to enforce the
+          required case. */}
+      {selectedSite && siteConns.length > 0 && onConnectorChange && (() => {
+        const policy = selectedSite.selectionPolicy || "first-available";
+        const exact = policy === "exact-connector";
+        return (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ marginBottom: 6, font: "500 11px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>
+              Site policy: <strong style={{ color: "var(--fg-2)" }}>{ztnaPolicyLabel(policy)}</strong>
             </div>
-          )}
-        </div>
-      )}
+            <Field
+              label={exact ? "Exact connector" : "Preferred connector"}
+              required={exact}
+              hint={exact
+                ? "This site pins each resource to one connector. All sessions for this resource route only through the connector you choose — no automatic failover."
+                : "PAM routes this resource through the preferred connector when healthy, and fails over to other connectors in the site automatically."}
+            >
+              <select className="input" value={connectorId || ""} onChange={e => onConnectorChange(e.target.value)}>
+                {exact
+                  ? <option value="">Select the connector for this resource…</option>
+                  : <option value="">
+                      Automatic — PAM picks a healthy connector{selectedSite.preferredConnectorId ? ` (site default: ${siteConns.find(c => c.id === selectedSite.preferredConnectorId)?.name || "—"})` : " (recommended)"}
+                    </option>}
+                {siteConns.map(c => {
+                  const st = store.connectorStatus(c);
+                  return <option key={c.id} value={c.id}>{ZTNA_STATUS[st]?.glyph || "●"} {c.name} · {c.platform} · {ZTNA_STATUS[st]?.label}</option>;
+                })}
+              </select>
+            </Field>
+            {chosenOffline && (
+              <div style={{ marginTop: 6, padding: 10, background: exact ? "var(--danger-soft)" : "var(--warning-soft)", color: exact ? "var(--danger-fg)" : "var(--warning-fg)", borderRadius: 4, font: "500 12px/1.5 var(--font-sans)" }}>
+                {exact
+                  ? <>⚑ {chosenConn.name} is currently {store.connectorStatus(chosenConn) === "offline" ? "offline" : "unhealthy"}. Under the Exact connector policy this resource will be <strong>unreachable</strong> until it recovers — there is no failover.</>
+                  : <>⚠ {chosenConn.name} is currently {store.connectorStatus(chosenConn) === "offline" ? "offline" : "unhealthy"}. Sessions will fail over to other online connectors in {selectedSite.name} until it recovers.</>}
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </>
   );
 };
@@ -1525,6 +1619,19 @@ const ztnaJumpValid = (routing) => {
   return !!(j.host && j.port && j.username && j.secret);
 };
 window.ztnaJumpValid = ztnaJumpValid;
+
+// Full routing validity — jump credentials plus the exact-connector
+// requirement: a site with selectionPolicy "exact-connector" makes the
+// connector pick mandatory, not a preference.
+const ztnaRoutingValid = (routing) => {
+  if (!ztnaJumpValid(routing)) return false;
+  if (routing?.method === "ztna" && routing.siteId) {
+    const site = (window.ztnaStore?.sites || []).find(s => s.id === routing.siteId);
+    if (site?.selectionPolicy === "exact-connector" && !routing.connectorId) return false;
+  }
+  return true;
+};
+window.ztnaRoutingValid = ztnaRoutingValid;
 
 // Static protocol heuristic: an SSH bastion (port 22 or SSH-key auth)
 // cannot natively proxy an RDP target (port 3389). PAM can't see the

@@ -1323,7 +1323,7 @@ const NewManualAdd = ({ onClose, onCreated }) => {
     { n: 3, label: "Confirm" },
   ];
   const step1Valid = data.name && data.host && credentialSourceValid(data.credentialSource)
-    && (!window.ztnaJumpValid || window.ztnaJumpValid(data.routing));
+    && (!window.ztnaRoutingValid || window.ztnaRoutingValid(data.routing));
   const canProceed = step === 1 ? step1Valid : true;
 
   const confirmClose = () => {
