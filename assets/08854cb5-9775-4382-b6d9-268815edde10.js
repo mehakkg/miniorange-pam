@@ -119,6 +119,7 @@ const App = () => {
       case "certificates": return <CertificatesV2 empty={tweaks.emptyState}/>;
       case "auth":         return <AuthenticationScreen empty={tweaks.emptyState}/>;
       case "twofactor":    return <TwoFactorScreen/>;
+      case "breakglass":   return React.createElement(window.BGDashboard || (() => null));
       case "ztna":         return React.createElement(window.ZTNAConnectorsPage || (() => null));
       case "settings":     return <SettingsScreen/>;
       case "customization":return <CustomizationScreen/>;

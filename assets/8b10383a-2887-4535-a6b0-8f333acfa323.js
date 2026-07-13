@@ -18,6 +18,10 @@ const NAV_GROUPS = [
 { label: "Security ops", items: [
   { id: "discovery", icon: "discovery", label: "Discovery & triage", badge: 6 },
   { id: "sessions", icon: "sessions", label: "Sessions & monitoring", live: 4 },
+  // Badge = count of pending post-incident reviews (outstanding obligation,
+  // not total activity). Computed live from bgStore so terminations and
+  // review closures update it on the next sidebar render.
+  { id: "breakglass", icon: "fire", label: "Break-Glass", badgeFn: () => (window.bgStore && window.bgStore.dashPendingCount) ? window.bgStore.dashPendingCount() : 0, badgeColor: "#7B3EA8" },
   { id: "endpoint", icon: "endpoint", label: "Endpoint Security", expandable: true, children: [
     { id: "ep-dashboard", label: "Overview" },
     { id: "ep-apps", label: "App management" },
@@ -100,13 +104,16 @@ const Sidebar = ({ active, onNav, collapsed, onToggleCollapse }) => {
                   <Icon name={it.icon} size={16} />
                   {!collapsed && <span style={{ flex: 1, whiteSpace: "nowrap" }}>{it.label}</span>}
                   {!collapsed && it.expandable && <Icon name={isExpanded ? "chevron-down" : "chevron-right"} size={11} color="var(--fg-4)" />}
-                  {!collapsed && it.badge &&
-                  <span style={{
-                    background: "var(--brand)", color: "#fff",
-                    font: "600 10px/1 var(--font-sans)",
-                    padding: "2px 6px", borderRadius: 9999, minWidth: 16, textAlign: "center"
-                  }}>{it.badge}</span>
-                  }
+                  {!collapsed && (() => {
+                    const badgeVal = it.badgeFn ? it.badgeFn() : it.badge;
+                    return badgeVal > 0 && (
+                      <span style={{
+                        background: it.badgeColor || "var(--brand)", color: "#fff",
+                        font: "600 10px/1 var(--font-sans)",
+                        padding: "2px 6px", borderRadius: 9999, minWidth: 16, textAlign: "center"
+                      }}>{badgeVal}</span>
+                    );
+                  })()}
                   {!collapsed && it.live &&
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                       <span className="dot dot-success pulse-dot" style={{ width: 6, height: 6 }} />
