@@ -20,6 +20,19 @@ const App = () => {
   const [stage, setStage] = React.useState(tweaks.stage || "app");
   React.useEffect(() => { if (tweaks.stage) setStage(tweaks.stage); }, [tweaks.stage]);
 
+  // Emergency entry — reachable via the bookmarkable #emergency hash (stands
+  // in for the /emergency path in this static prototype) or the global
+  // window.__enterEmergency() hook used from in-app entry points. Renders the
+  // dedicated dark flow with no standard PAM chrome.
+  const readEmergencyHash = () => typeof window !== "undefined" && /emergency/i.test(window.location.hash);
+  const [emergency, setEmergency] = React.useState(readEmergencyHash());
+  React.useEffect(() => {
+    const onHash = () => setEmergency(readEmergencyHash());
+    window.addEventListener("hashchange", onHash);
+    window.__enterEmergency = () => { try { window.location.hash = "emergency"; } catch (e) {} setEmergency(true); };
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
   const [portal, setPortal] = React.useState(tweaks.portal || "admin");
   React.useEffect(() => { if (tweaks.portal) setPortal(tweaks.portal); }, [tweaks.portal]);
 
@@ -78,6 +91,13 @@ const App = () => {
       </TweakSection>
     </TweaksPanel>
   );
+
+  // ---- Emergency entry (intercepts everything) ----
+  if (emergency && window.EmergencyEntryFlow) {
+    return React.createElement(window.EmergencyEntryFlow, {
+      onExit: () => { try { if (window.location.hash) window.location.hash = ""; } catch (e) {} setEmergency(false); },
+    });
+  }
 
   // ---- Login stage ----
   if (stage === "login") {
