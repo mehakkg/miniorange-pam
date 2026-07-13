@@ -12,18 +12,33 @@
 // Router-less prototype: the flow is reachable via #emergency (App reads the
 // hash) or window.__enterEmergency(). No standard PAM chrome renders here.
 
-const EM_BG = "#0F0E0C";       // near-black — unmistakably "not a normal screen"
+// Light theme. The purple header strip + red consequence bar still signal
+// "this is not a routine login"; the surface itself is on-brand white.
+const EM_BG = "var(--bg-app)";     // light page
+const EM_CARD = "#fff";
 const EM_PURPLE = "#7B3EA8";
 const EM_RED = "#C0392B";
 const EM_SOFT = "color-mix(in oklch, #7B3EA8 12%, transparent)";
+const EM_TX = "var(--fg-1)";       // primary text (was #fff on dark)
+const EM_TX2 = "var(--fg-2)";
+const EM_TX_DIM = "var(--fg-3)";   // secondary (was #B8B4C0)
+const EM_TX_FAINT = "var(--fg-4)"; // faint (was #8A857C / #9C97A8)
+const EM_SURF = "var(--bg-surface-2)";
+const EM_BORDER = "var(--border)";
 
 // =========================================================
 // SHARED CHROME
 // =========================================================
 const EmHeaderStrip = () => (
   <div style={{ height: 56, background: EM_PURPLE, display: "flex", alignItems: "center", gap: 10, padding: "0 18px", flex: "none" }}>
-    <span style={{ fontSize: 20, color: "#fff" }}>⚡</span>
-    <span style={{ font: "600 14px/1 var(--font-sans)", color: "#fff" }}>Emergency Access — miniOrange PAM</span>
+    {/* miniOrange PAM logo — brand shield on a white chip so it reads on purple */}
+    <span style={{ width: 32, height: 32, borderRadius: 8, background: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", flex: "none" }}>
+      {window.BrandMark ? <BrandMark size={22}/> : <span style={{ color: EM_PURPLE, fontWeight: 700 }}>m</span>}
+    </span>
+    <span style={{ font: "600 14px/1 var(--font-sans)", color: "#fff" }}>miniOrange PAM</span>
+    <span style={{ width: 1, height: 20, background: "rgba(255,255,255,0.35)", margin: "0 4px" }}/>
+    <span style={{ fontSize: 15 }}>⚡</span>
+    <span style={{ font: "500 13px/1 var(--font-sans)", color: "rgba(255,255,255,0.9)" }}>Emergency Access</span>
   </div>
 );
 
@@ -58,9 +73,9 @@ const EmDigitBoxes = ({ value, onChange, onComplete, disabled, error }) => {
           style={{
             width: 48, height: 56, textAlign: "center",
             font: "600 22px/1 var(--font-mono)",
-            border: `1.5px solid ${error ? EM_RED : "#3A3733"}`,
-            borderRadius: 8, background: disabled ? "#1C1A17" : "#141210",
-            color: "#fff", outline: "none",
+            border: `1.5px solid ${error ? EM_RED : "var(--border)"}`,
+            borderRadius: 8, background: disabled ? "var(--bg-surface-2)" : "#fff",
+            color: "var(--fg-1)", outline: "none",
             transition: "border-color 120ms",
           }}
         />
@@ -109,13 +124,13 @@ const EmLoginScreen = ({ onAuthed, onReturn }) => {
       <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
         <div style={{ width: "100%", maxWidth: 420 }}>
           {status === "locked" && (
-            <div style={{ background: "color-mix(in oklch, " + EM_RED + " 20%, #141210)", border: `1px solid ${EM_RED}`, borderRadius: 8, padding: 16, marginBottom: 14 }}>
-              <div style={{ font: "700 14px/1.3 var(--font-sans)", color: "#fff" }}>Your account has been locked after 3 failed attempts.</div>
-              <div style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "#E5B8B2", marginTop: 6 }}>Contact another admin immediately: <strong style={{ color: "#fff" }}>Aria Chen · +1 (415) 555-0142</strong></div>
+            <div style={{ background: "var(--danger-soft)", border: `1px solid ${EM_RED}`, borderRadius: 8, padding: 16, marginBottom: 14 }}>
+              <div style={{ font: "700 14px/1.3 var(--font-sans)", color: "var(--danger-fg)" }}>Your account has been locked after 3 failed attempts.</div>
+              <div style={{ font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-2)", marginTop: 6 }}>Contact another admin immediately: <strong style={{ color: "var(--fg-1)" }}>Aria Chen · +1 (415) 555-0142</strong></div>
             </div>
           )}
 
-          <div style={{ background: "#fff", borderRadius: 8, padding: 24 }}>
+          <div style={{ background: "#fff", border: "1px solid var(--border)", boxShadow: "var(--shadow-md, 0 4px 16px rgba(0,0,0,0.06))", borderRadius: 8, padding: 24 }}>
             <div style={{ font: "600 18px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>Sign in to continue</div>
             <div style={{ font: "400 13px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>You'll be taken directly to emergency access.</div>
 
@@ -156,7 +171,7 @@ const EmLoginScreen = ({ onAuthed, onReturn }) => {
           </div>
 
           <div style={{ textAlign: "center", marginTop: 16 }}>
-            <a href="#" onClick={e => { e.preventDefault(); onReturn(); }} style={{ font: "500 12.5px/1 var(--font-sans)", color: "#9C97A8" }}>Return to standard login →</a>
+            <a href="#" onClick={e => { e.preventDefault(); onReturn(); }} style={{ font: "500 12.5px/1 var(--font-sans)", color: "var(--fg-4)" }}>Return to standard login →</a>
           </div>
         </div>
       </div>
@@ -225,7 +240,7 @@ const EmMfaScreen = ({ onVerified, method: initialMethod = "app" }) => {
       <EmHeaderStrip/>
       <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
         <div style={{ width: "100%", maxWidth: 420 }}>
-          <div style={{ background: "#fff", borderRadius: 8, padding: 24 }}>
+          <div style={{ background: "#fff", border: "1px solid var(--border)", boxShadow: "var(--shadow-md, 0 4px 16px rgba(0,0,0,0.06))", borderRadius: 8, padding: 24 }}>
             <div style={{ font: "600 18px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>Verify your identity</div>
             <div style={{ font: "400 13px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>One more step before emergency access.</div>
 
@@ -298,7 +313,7 @@ const EmMfaScreen = ({ onVerified, method: initialMethod = "app" }) => {
     </div>
   );
 };
-const bgdKeyBg = (status) => status === "success" ? "var(--success-soft)" : "color-mix(in oklch, #7B3EA8 18%, #141210)";
+const bgdKeyBg = (status) => status === "success" ? "var(--success-soft)" : EM_SOFT;
 
 // =========================================================
 // SCREEN 3 — TRANSITION
@@ -323,9 +338,9 @@ const EmTransitionScreen = ({ onDone }) => {
       <EmHeaderStrip/>
       <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center" }}>
         <div style={{ fontSize: 48, color: EM_PURPLE, marginBottom: 16, animation: "bgPulse 1.5s" }}>⚡</div>
-        <div style={{ font: "600 24px/1.2 var(--font-sans)", color: "#fff" }}>Preparing emergency access</div>
-        <div style={{ font: "400 15px/1.5 var(--font-sans)", color: "#B8B4C0", marginTop: 8 }}>Taking you directly to the emergency access form.</div>
-        <div style={{ width: "100%", maxWidth: 320, height: 3, background: "#2A2724", borderRadius: 2, marginTop: 28, overflow: "hidden" }}>
+        <div style={{ font: "600 24px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>Preparing emergency access</div>
+        <div style={{ font: "400 15px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 8 }}>Taking you directly to the emergency access form.</div>
+        <div style={{ width: "100%", maxWidth: 320, height: 3, background: "var(--border)", borderRadius: 2, marginTop: 28, overflow: "hidden" }}>
           <div style={{ width: pct + "%", height: "100%", background: EM_PURPLE, transition: "width 60ms linear" }}/>
         </div>
       </div>
@@ -464,7 +479,7 @@ const EmFormScreen = ({ form, setForm, onReview, onCancel, prefillNote }) => {
       <EmHeaderStrip/>
       <div className="scroll-area" style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center" }}>
         <div style={{ width: "100%", maxWidth: 640, padding: "18px 18px 32px" }}>
-          <div style={{ font: "500 12px/1 var(--font-sans)", color: "#B8B4C0", marginBottom: 14 }}>Step 1 of 2 — Emergency details</div>
+          <div style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-3)", marginBottom: 14 }}>Step 1 of 2 — Emergency details</div>
           <div style={{ background: "#fff", borderRadius: 8, padding: 20, display: "flex", flexDirection: "column", gap: 22 }}>
 
             {prefillNote && (
@@ -591,7 +606,7 @@ const EmReviewScreen = ({ form, onGrant, onEdit }) => {
       <EmHeaderStrip/>
       <div className="scroll-area" style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center" }}>
         <div style={{ width: "100%", maxWidth: 640, padding: "18px 18px 32px" }}>
-          <div style={{ font: "500 12px/1 var(--font-sans)", color: "#B8B4C0", marginBottom: 14 }}>Step 2 of 2 — Review before granting</div>
+          <div style={{ font: "500 12px/1 var(--font-sans)", color: "var(--fg-3)", marginBottom: 14 }}>Step 2 of 2 — Review before granting</div>
           <div style={{ background: "#fff", borderRadius: 8, padding: 20 }}>
             <div style={{ font: "600 20px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>Review before you grant</div>
             <div style={{ font: "500 13px/1.5 var(--font-sans)", color: EM_RED, marginTop: 4 }}>This cannot be undone — only revoked.</div>
@@ -672,7 +687,7 @@ const EmGrantingScreen = ({ form, onDone }) => {
       <EmHeaderStrip/>
       <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
         <div style={{ width: "100%", maxWidth: 420 }}>
-          <div style={{ font: "600 18px/1.3 var(--font-sans)", color: "#fff", marginBottom: 20, textAlign: "center" }}>Granting emergency access…</div>
+          <div style={{ font: "600 18px/1.3 var(--font-sans)", color: "var(--fg-1)", marginBottom: 20, textAlign: "center" }}>Granting emergency access…</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {EM_GRANT_STEPS.map((s, i) => {
               const complete = i < done;
@@ -681,11 +696,11 @@ const EmGrantingScreen = ({ form, onDone }) => {
                           : s === "Notifying security team" ? "Notifying security team"
                           : s;
               return (
-                <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", background: complete || active ? "#1A1815" : "transparent", borderRadius: 6, opacity: complete || active ? 1 : 0.4 }}>
-                  <span style={{ width: 20, textAlign: "center", color: complete ? "var(--success-fg)" : active ? EM_PURPLE : "#5A564F" }}>
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", background: complete || active ? "var(--bg-surface-2)" : "transparent", borderRadius: 6, opacity: complete || active ? 1 : 0.4 }}>
+                  <span style={{ width: 20, textAlign: "center", color: complete ? "var(--success-fg)" : active ? EM_PURPLE : "var(--fg-4)" }}>
                     {complete ? "✓" : active ? <Spinner size={13}/> : "○"}
                   </span>
-                  <span style={{ flex: 1, font: "500 13px/1.4 var(--font-sans)", color: complete ? "#DFE3E8" : active ? "#fff" : "#8A857C" }}>{label}</span>
+                  <span style={{ flex: 1, font: "500 13px/1.4 var(--font-sans)", color: complete ? "var(--fg-2)" : active ? "var(--fg-1)" : "var(--fg-4)" }}>{label}</span>
                 </div>
               );
             })}
@@ -709,7 +724,7 @@ const EmGrantedScreen = ({ session, form, onMonitor, onExit }) => {
       <div className="scroll-area" style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center" }}>
         <div style={{ width: "100%", maxWidth: 480, padding: "24px 18px", textAlign: "center" }}>
           <div style={{ fontSize: 40, color: EM_PURPLE }}>⚡</div>
-          <div style={{ font: "600 24px/1.2 var(--font-sans)", color: "#fff", marginTop: 8 }}>Emergency access granted</div>
+          <div style={{ font: "600 24px/1.2 var(--font-sans)", color: "var(--fg-1)", marginTop: 8 }}>Emergency access granted</div>
 
           <div style={{ marginTop: 20, background: "#fff", border: `2px solid ${EM_PURPLE}`, borderRadius: 8, padding: 16, textAlign: "left" }}>
             <div className="t-mono" style={{ font: "700 14px/1.3 var(--font-mono)", color: EM_PURPLE, marginBottom: 10 }}>{session.id}</div>
@@ -720,7 +735,7 @@ const EmGrantedScreen = ({ session, form, onMonitor, onExit }) => {
             ))}
           </div>
 
-          <div style={{ marginTop: 12, padding: 10, background: "#1A1815", borderRadius: 6, font: "500 11px/1.5 var(--font-mono)", color: "#9CA3AF", textAlign: "left" }}>
+          <div style={{ marginTop: 12, padding: 10, background: "var(--bg-surface-2)", borderRadius: 6, font: "500 11px/1.5 var(--font-mono)", color: "var(--fg-3)", textAlign: "left" }}>
             Logged: {session.id} granted at {new Date(session.grantedAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })} by Arjun Bansal · {form.incident || "—"} · Northwind Financial
           </div>
 
@@ -730,7 +745,7 @@ const EmGrantedScreen = ({ session, form, onMonitor, onExit }) => {
               style={{ height: 48, border: `1px solid ${EM_PURPLE}`, background: "#fff", color: EM_PURPLE, font: "600 14px/1 var(--font-sans)", borderRadius: 8, cursor: "pointer" }}>
               {notified ? `Resend grant details to ${form.recipient.name.split(" ")[0]}` : `Send grant details to ${form.recipient.name.split(" ")[0]}`}
             </button>
-            <button onClick={onExit} style={{ height: 44, border: "none", background: "transparent", color: "#9C97A8", font: "500 13px/1 var(--font-sans)", cursor: "pointer" }}>Go to PAM dashboard</button>
+            <button onClick={onExit} style={{ height: 44, border: "none", background: "transparent", color: "var(--fg-4)", font: "500 13px/1 var(--font-sans)", cursor: "pointer" }}>Go to PAM dashboard</button>
           </div>
         </div>
       </div>
@@ -786,28 +801,28 @@ const EmMonitorScreen = ({ session, form, onTerminate, onExtend }) => {
       <div className="scroll-area" style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center" }}>
         <div style={{ width: "100%", maxWidth: 480, padding: "18px 16px 28px" }}>
           {/* TOP — grant status, terminate always first/visible */}
-          <div style={{ font: "600 14px/1.3 var(--font-sans)", color: "#fff" }}>⚡ <span className="t-mono">{session.id}</span> — Active</div>
-          <div style={{ font: "400 13px/1.4 var(--font-sans)", color: "#B8B4C0", marginTop: 4 }}>{form.recipient.name} → <span className="t-mono">{form.resource.name}</span></div>
+          <div style={{ font: "600 14px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>⚡ <span className="t-mono">{session.id}</span> — Active</div>
+          <div style={{ font: "400 13px/1.4 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>{form.recipient.name} → <span className="t-mono">{form.resource.name}</span></div>
 
-          <div style={{ marginTop: 14, padding: "16px", background: "#1A1815", borderRadius: 10, textAlign: "center" }}>
-            <div style={{ font: "500 11px/1 var(--font-sans)", color: "#8A857C", textTransform: "uppercase", letterSpacing: 0.6 }}>Time remaining</div>
+          <div style={{ marginTop: 14, padding: "16px", background: "var(--bg-surface-2)", borderRadius: 10, textAlign: "center" }}>
+            <div style={{ font: "500 11px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>Time remaining</div>
             <div className="t-mono" style={{ font: "700 34px/1.1 var(--font-mono)", color: cdColor, marginTop: 6, animation: critical ? "bgPulse 1.6s infinite" : "none" }}>{bgdFmtCountdown(msLeft)}</div>
           </div>
 
           <button onClick={onTerminate} style={{ ...emBtnPrimary, height: 56, marginTop: 12, background: EM_RED }}>Terminate</button>
-          <button onClick={onExtend} style={{ width: "100%", height: 48, marginTop: 8, border: `1px solid ${EM_PURPLE}`, background: "transparent", color: "#C9A6E0", font: "600 14px/1 var(--font-sans)", borderRadius: 8, cursor: "pointer" }}>Extend</button>
+          <button onClick={onExtend} style={{ width: "100%", height: 48, marginTop: 8, border: `1px solid ${EM_PURPLE}`, background: "transparent", color: EM_PURPLE, font: "600 14px/1 var(--font-sans)", borderRadius: 8, cursor: "pointer" }}>Extend</button>
 
           {/* Risk score */}
           <div style={{ marginTop: 18, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span style={{ font: "600 11px/1 var(--font-sans)", color: "#8A857C", textTransform: "uppercase", letterSpacing: 0.6 }}>Live commands</span>
+            <span style={{ font: "600 11px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6 }}>Live commands</span>
             <span style={{ padding: "3px 10px", borderRadius: 999, font: "700 12px/1.3 var(--font-sans)", background: "rgba(248,113,113,0.18)", color: "#F87171" }}>Risk: 91 — Critical</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
-            <span style={{ font: "400 11.5px/1 var(--font-sans)", color: paused ? "#8A857C" : "var(--success-fg)", display: "inline-flex", alignItems: "center", gap: 5 }}>
-              <span className={paused ? "" : "pulse-dot"} style={{ width: 6, height: 6, borderRadius: "50%", background: paused ? "#8A857C" : "var(--success-fg)", display: "inline-block" }}/>
+            <span style={{ font: "400 11.5px/1 var(--font-sans)", color: paused ? "var(--fg-4)" : "var(--success-fg)", display: "inline-flex", alignItems: "center", gap: 5 }}>
+              <span className={paused ? "" : "pulse-dot"} style={{ width: 6, height: 6, borderRadius: "50%", background: paused ? "var(--fg-4)" : "var(--success-fg)", display: "inline-block" }}/>
               {paused ? "Paused" : "Refreshing every 5 seconds"}
             </span>
-            <button onClick={() => setPaused(p => !p)} style={{ border: "none", background: "none", color: "#C9A6E0", font: "500 11.5px/1 var(--font-sans)", cursor: "pointer" }}>{paused ? "Resume" : "Pause"}</button>
+            <button onClick={() => setPaused(p => !p)} style={{ border: "none", background: "none", color: EM_PURPLE, font: "500 11.5px/1 var(--font-sans)", cursor: "pointer" }}>{paused ? "Resume" : "Pause"}</button>
           </div>
 
           {/* Feed */}
@@ -823,11 +838,11 @@ const EmMonitorScreen = ({ session, form, onTerminate, onExtend }) => {
           </div>
 
           {/* Collapsible session details */}
-          <button onClick={() => setDetailsOpen(o => !o)} style={{ marginTop: 14, width: "100%", textAlign: "left", border: "none", background: "none", color: "#C9A6E0", font: "500 13px/1 var(--font-sans)", cursor: "pointer" }}>
+          <button onClick={() => setDetailsOpen(o => !o)} style={{ marginTop: 14, width: "100%", textAlign: "left", border: "none", background: "none", color: EM_PURPLE, font: "500 13px/1 var(--font-sans)", cursor: "pointer" }}>
             Session details {detailsOpen ? "↑" : "↓"}
           </button>
           {detailsOpen && (
-            <div style={{ marginTop: 8, padding: 12, background: "#1A1815", borderRadius: 8, font: "400 12px/1.7 var(--font-mono)", color: "#B8B4C0" }}>
+            <div style={{ marginTop: 8, padding: 12, background: "var(--bg-surface-2)", borderRadius: 8, font: "400 12px/1.7 var(--font-mono)", color: "var(--fg-3)" }}>
               Resource: {form.resource.name} · {form.resource.ip}<br/>
               Credential: {session.credential} (non-viewable)<br/>
               Policy: 4h window · recording on · rotation queued<br/>
@@ -836,8 +851,8 @@ const EmMonitorScreen = ({ session, form, onTerminate, onExtend }) => {
           )}
 
           {/* Demo-only countdown state controls */}
-          <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px dashed #2A2724", display: "flex", gap: 6, justifyContent: "center", flexWrap: "wrap" }}>
-            <span className="t-tiny" style={{ color: "#5A564F" }}>[Demo] Countdown:</span>
+          <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px dashed var(--border)", display: "flex", gap: 6, justifyContent: "center", flexWrap: "wrap" }}>
+            <span className="t-tiny" style={{ color: "var(--fg-4)" }}>[Demo] Countdown:</span>
             <button onClick={() => setExpiresAtMs(session.expiresAtMs)} style={emDemoBtn}>Normal</button>
             <button onClick={() => setExpiresAtMs(Date.now() + 25 * 60000)} style={emDemoBtn}>&lt;30m (amber)</button>
             <button onClick={() => setExpiresAtMs(Date.now() + 8 * 60000)} style={emDemoBtn}>&lt;10m (red)</button>
@@ -848,7 +863,7 @@ const EmMonitorScreen = ({ session, form, onTerminate, onExtend }) => {
     </div>
   );
 };
-const emDemoBtn = { font: "500 11px/1 var(--font-sans)", padding: "3px 8px", borderRadius: 4, border: "1px solid #3A3733", background: "#1A1815", color: "#B8B4C0", cursor: "pointer" };
+const emDemoBtn = { font: "500 11px/1 var(--font-sans)", padding: "3px 8px", borderRadius: 4, border: "1px solid var(--border)", background: "var(--bg-surface-2)", color: "var(--fg-3)", cursor: "pointer" };
 
 // =========================================================
 // TERMINATE OVERLAY (mobile — full-screen, large tap targets)
@@ -863,26 +878,26 @@ const EmTerminateOverlay = ({ form, onConfirm, onCancel }) => {
       <EmHeaderStrip/>
       <div className="scroll-area" style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center" }}>
         <div style={{ width: "100%", maxWidth: 440, padding: "24px 18px" }}>
-          <div style={{ font: "600 20px/1.3 var(--font-sans)", color: "#fff" }}>Terminate emergency access?</div>
-          <div style={{ font: "400 14px/1.6 var(--font-sans)", color: "#B8B4C0", marginTop: 10 }}>{form.recipient.name} will be disconnected from <span className="t-mono" style={{ color: "#DFE3E8" }}>{form.resource.name}</span> immediately.</div>
-          <div style={{ marginTop: 10, padding: 12, background: "rgba(192,57,43,0.16)", borderLeft: `3px solid ${EM_RED}`, borderRadius: "0 6px 6px 0", font: "500 13px/1.5 var(--font-sans)", color: "#F0A9A0" }}>
+          <div style={{ font: "600 20px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>Terminate emergency access?</div>
+          <div style={{ font: "400 14px/1.6 var(--font-sans)", color: "var(--fg-3)", marginTop: 10 }}>{form.recipient.name} will be disconnected from <span className="t-mono" style={{ color: "var(--fg-1)" }}>{form.resource.name}</span> immediately.</div>
+          <div style={{ marginTop: 10, padding: 12, background: "var(--danger-soft)", borderLeft: `3px solid ${EM_RED}`, borderRadius: "0 6px 6px 0", font: "500 13px/1.5 var(--font-sans)", color: "var(--danger-fg)" }}>
             Credential rotation will begin automatically.
           </div>
 
           <div style={{ marginTop: 18 }}>
-            <label style={{ font: "500 12.5px/1.4 var(--font-sans)", color: "#B8B4C0" }}>Reason</label>
-            <select value={reason} onChange={e => setReason(e.target.value)} className="input" style={{ marginTop: 6, height: 48, fontSize: 15, background: "#141210", color: "#fff", borderColor: "#3A3733" }}>
+            <label style={{ font: "500 12.5px/1.4 var(--font-sans)", color: "var(--fg-3)" }}>Reason</label>
+            <select value={reason} onChange={e => setReason(e.target.value)} className="input" style={{ marginTop: 6, height: 48, fontSize: 15, background: "#fff", color: "var(--fg-1)", borderColor: "var(--border)" }}>
               <option value="">Select a reason…</option>
               {reasons.map(r => <option key={r} value={r}>{r}</option>)}
             </select>
             {reason === "Other" && (
-              <input className="input" value={other} onChange={e => setOther(e.target.value)} placeholder="Describe…" style={{ marginTop: 8, height: 44, background: "#141210", color: "#fff", borderColor: "#3A3733" }}/>
+              <input className="input" value={other} onChange={e => setOther(e.target.value)} placeholder="Describe…" style={{ marginTop: 8, height: 44, background: "#fff", color: "var(--fg-1)", borderColor: "var(--border)" }}/>
             )}
           </div>
 
-          <button onClick={onCancel} style={{ width: "100%", height: 48, marginTop: 20, border: "1px solid #3A3733", background: "transparent", color: "#DFE3E8", font: "600 14px/1 var(--font-sans)", borderRadius: 8, cursor: "pointer" }}>Cancel</button>
+          <button onClick={onCancel} style={{ width: "100%", height: 48, marginTop: 20, border: "1px solid var(--border)", background: "transparent", color: "var(--fg-1)", font: "600 14px/1 var(--font-sans)", borderRadius: 8, cursor: "pointer" }}>Cancel</button>
           <button onClick={() => valid && onConfirm(reason === "Other" ? other : reason)} disabled={!valid}
-            style={{ width: "100%", height: 56, marginTop: 10, border: "none", background: valid ? EM_RED : "#5A2420", color: "#fff", font: "700 15px/1 var(--font-sans)", borderRadius: 8, cursor: valid ? "pointer" : "not-allowed" }}>
+            style={{ width: "100%", height: 56, marginTop: 10, border: "none", background: valid ? EM_RED : "var(--bg-surface-2)", color: valid ? "#fff" : "var(--fg-4)", font: "700 15px/1 var(--font-sans)", borderRadius: 8, cursor: valid ? "pointer" : "not-allowed" }}>
             Terminate and revoke
           </button>
         </div>
@@ -916,27 +931,27 @@ const EmTerminatedScreen = ({ session, form, review, onStartReview, onExit }) =>
       <div className="scroll-area" style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center" }}>
         <div style={{ width: "100%", maxWidth: 440, padding: "28px 18px", textAlign: "center" }}>
           <div style={{ width: 56, height: 56, borderRadius: "50%", background: "var(--success-soft)", color: "var(--success-fg)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 26 }}>✓</div>
-          <div style={{ font: "600 22px/1.2 var(--font-sans)", color: "#fff", marginTop: 12 }}>Emergency access ended</div>
-          <div style={{ font: "400 13.5px/1.6 var(--font-sans)", color: "#B8B4C0", marginTop: 8 }}>{form.recipient.name} has been disconnected from <span className="t-mono">{form.resource.name}</span>.</div>
+          <div style={{ font: "600 22px/1.2 var(--font-sans)", color: "var(--fg-1)", marginTop: 12 }}>Emergency access ended</div>
+          <div style={{ font: "400 13.5px/1.6 var(--font-sans)", color: "var(--fg-3)", marginTop: 8 }}>{form.recipient.name} has been disconnected from <span className="t-mono">{form.resource.name}</span>.</div>
 
-          <div style={{ marginTop: 16, padding: 14, background: "#1A1815", borderRadius: 8, textAlign: "left" }}>
-            <div style={{ font: "500 13px/1.5 var(--font-sans)", color: "#DFE3E8" }}><span className="t-mono">{session.credential}</span> rotation: <span style={{ color: rot.c }}>{rot.t}</span></div>
+          <div style={{ marginTop: 16, padding: 14, background: "var(--bg-surface-2)", borderRadius: 8, textAlign: "left" }}>
+            <div style={{ font: "500 13px/1.5 var(--font-sans)", color: "var(--fg-1)" }}><span className="t-mono">{session.credential}</span> rotation: <span style={{ color: rot.c }}>{rot.t}</span></div>
             {rotation === "failed" && (
-              <button onClick={() => setRotation("in-progress")} style={{ marginTop: 8, ...emDemoBtn, color: "#F0A9A0", borderColor: "#5A2420" }}>Retry rotation</button>
+              <button onClick={() => setRotation("in-progress")} style={{ marginTop: 8, ...emDemoBtn, color: "var(--danger-fg)", borderColor: "var(--danger-fg)" }}>Retry rotation</button>
             )}
             {rotation !== "failed" && (
               <button onClick={() => setRotation("failed")} style={{ marginTop: 8, ...emDemoBtn }}>[Demo] Show rotation failed</button>
             )}
           </div>
 
-          <div style={{ marginTop: 14, padding: 14, background: "color-mix(in oklch, " + EM_PURPLE + " 16%, #141210)", borderRadius: 8, textAlign: "left" }}>
-            <div style={{ font: "600 13.5px/1.4 var(--font-sans)", color: "#fff" }}>Post-incident review required</div>
-            <div style={{ font: "400 12.5px/1.6 var(--font-sans)", color: "#C9C5CE", marginTop: 4 }}>Review must be completed within {days} days (by {dueDate}). You'll receive a reminder notification.</div>
+          <div style={{ marginTop: 14, padding: 14, background: EM_SOFT, borderRadius: 8, textAlign: "left" }}>
+            <div style={{ font: "600 13.5px/1.4 var(--font-sans)", color: "var(--fg-1)" }}>Post-incident review required</div>
+            <div style={{ font: "400 12.5px/1.6 var(--font-sans)", color: "var(--fg-3)", marginTop: 4 }}>Review must be completed within {days} days (by {dueDate}). You'll receive a reminder notification.</div>
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 18 }}>
             <button onClick={onStartReview} style={{ ...emBtnPrimary, height: 56, marginTop: 0 }}>Start review now →</button>
-            <button onClick={onExit} style={{ height: 44, border: "none", background: "transparent", color: "#9C97A8", font: "500 13px/1 var(--font-sans)", cursor: "pointer" }}>Review later — go to dashboard</button>
+            <button onClick={onExit} style={{ height: 44, border: "none", background: "transparent", color: "var(--fg-4)", font: "500 13px/1 var(--font-sans)", cursor: "pointer" }}>Review later — go to dashboard</button>
           </div>
         </div>
       </div>
