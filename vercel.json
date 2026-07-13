@@ -1,1 +1,5 @@
-{}
+{
+  "rewrites": [
+    { "source": "/emergency", "destination": "/index.html" }
+  ]
+}
