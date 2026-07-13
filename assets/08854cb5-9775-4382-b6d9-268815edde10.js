@@ -26,10 +26,15 @@ const App = () => {
   // dedicated dark flow with no standard PAM chrome.
   const readEmergencyHash = () => typeof window !== "undefined" && /emergency/i.test(window.location.hash);
   const [emergency, setEmergency] = React.useState(readEmergencyHash());
+  const [emStart, setEmStart] = React.useState("login");   // "login" (direct URL) | "form" (Path B, already authed)
+  const [emRedirect, setEmRedirect] = React.useState(false);
   React.useEffect(() => {
     const onHash = () => setEmergency(readEmergencyHash());
     window.addEventListener("hashchange", onHash);
-    window.__enterEmergency = () => { try { window.location.hash = "emergency"; } catch (e) {} setEmergency(true); };
+    window.__enterEmergency = () => { try { window.location.hash = "emergency"; } catch (e) {} setEmStart("login"); setEmergency(true); };
+    // Path B — standard-login → emergency redirect. Demo trigger surfaces the
+    // modal-priority card over the normal shell.
+    window.__emShowRedirect = () => setEmRedirect(true);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
@@ -95,7 +100,8 @@ const App = () => {
   // ---- Emergency entry (intercepts everything) ----
   if (emergency && window.EmergencyEntryFlow) {
     return React.createElement(window.EmergencyEntryFlow, {
-      onExit: () => { try { if (window.location.hash) window.location.hash = ""; } catch (e) {} setEmergency(false); },
+      startScreen: emStart,
+      onExit: () => { try { if (window.location.hash) window.location.hash = ""; } catch (e) {} setEmStart("login"); setEmergency(false); },
     });
   }
 
@@ -244,6 +250,10 @@ const App = () => {
     {tweaksUI}
     {portal === "admin" && window.BreakGlassController && React.createElement(window.BreakGlassController)}
     {portal === "admin" && window.ZTNAController && React.createElement(window.ZTNAController)}
+    {emRedirect && window.EmRedirectModal && React.createElement(window.EmRedirectModal, {
+      onGo: () => { setEmRedirect(false); setEmStart("form"); setEmergency(true); },
+      onDismiss: () => setEmRedirect(false),
+    })}
     {showAddPanel && <ResourceAddPanel
       onClose={(intent) => {
         setShowAddPanel(false);

@@ -341,30 +341,456 @@ const EmConsequenceBar = () => (
   </div>
 );
 
+// Status bar — replaces the consequence bar once access is active (Screen 7+).
+// The emergency is now known; live status is what matters.
+const EmStatusBar = ({ session, onTerminate }) => {
+  const [, tick] = React.useReducer(x => x + 1, 0);
+  React.useEffect(() => { const t = setInterval(tick, 1000); return () => clearInterval(t); }, []);
+  const msLeft = (session.expiresAtMs || Date.now()) - Date.now();
+  return (
+    <div style={{ background: EM_PURPLE, color: "#fff", padding: "10px 16px", display: "flex", alignItems: "center", gap: 10, font: "500 12.5px/1.3 var(--font-sans)", flex: "none" }}>
+      <span>⚡ Break-glass active · <span className="t-mono">{session.id}</span> · <span className="t-mono">{bgdFmtCountdown(msLeft)}</span> remaining</span>
+      <div style={{ flex: 1 }}/>
+      {onTerminate && <button onClick={onTerminate} style={{ border: "1px solid rgba(255,255,255,0.4)", background: "transparent", color: "#fff", font: "600 11.5px/1 var(--font-sans)", padding: "5px 10px", borderRadius: 5, cursor: "pointer" }}>Terminate</button>}
+    </div>
+  );
+};
+
+// =========================================================
+// EMERGENCY-FLOW SEED DATA (recipients + resources for live search)
+// =========================================================
+const EM_RECIPIENTS = [
+  { id: "u-rohan",  name: "Rohan Mehta",     email: "rohan.mehta@northwind.com",   role: "Backend Engineer · Operator" },
+  { id: "u-priya",  name: "Priya Iyer",      email: "priya.iyer@northwind.com",    role: "SRE" },
+  { id: "u-marcus", name: "Marcus Chen",     email: "marcus.chen@northwind.com",   role: "Data Engineer" },
+  { id: "u-aditya", name: "Aditya Kulkarni", email: "aditya.k@northwind.com",      role: "Platform Engineer" },
+];
+const EM_RESOURCES = [
+  { id: "r-proddb",  name: "prod-db-primary", type: "database", typeLabel: "Database · PostgreSQL", ip: "10.42.18.7:5432", env: "Production", criticality: "Critical", sessions: 2, creds: ["root-primary", "ro-analytics"] },
+  { id: "r-auth",    name: "auth-server-01",  type: "server",   typeLabel: "Server · Linux",        ip: "10.42.18.20:22",  env: "Production", criticality: "High",     sessions: 0, creds: ["linux-ssh-admin"] },
+  { id: "r-oracle",  name: "oracle-reporting", type: "database", typeLabel: "Database · Oracle",     ip: "10.42.19.4:1521", env: "Production", criticality: "High",     sessions: 1, creds: ["oracle-dba-01"] },
+  { id: "r-billing", name: "legacy-billing",  type: "server",   typeLabel: "Server · Windows",      ip: "10.42.20.9:3389", env: "Production", criticality: "Critical", sessions: 0, creds: [] },  // no creds → blocked
+];
+
+// =========================================================
+// SCREEN 4 — EMERGENCY FORM
+// =========================================================
+const EmSeverityCard = ({ level, title, desc, selected, onSelect }) => {
+  const c = { P1: EM_RED, P2: "var(--warning-fg)", P3: "var(--brand-fg)" }[level];
+  return (
+    <button onClick={onSelect} style={{
+      width: "100%", minHeight: 64, textAlign: "left", padding: "12px 14px", cursor: "pointer",
+      border: `1.5px solid ${selected ? EM_PURPLE : c}`,
+      background: selected ? EM_SOFT : "#fff", borderRadius: 8,
+      display: "flex", alignItems: "center", gap: 12,
+    }}>
+      <span style={{ padding: "3px 9px", borderRadius: 999, font: "700 12px/1.4 var(--font-sans)", background: selected ? EM_SOFT : "var(--bg-surface-2)", color: c, border: `1px solid ${c}` }}>{level}</span>
+      <span style={{ flex: 1 }}>
+        <span style={{ display: "block", font: "700 13.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{title}</span>
+        <span style={{ display: "block", font: "400 12px/1.4 var(--font-sans)", color: "var(--fg-3)", marginTop: 2 }}>{desc}</span>
+      </span>
+      {selected && <span style={{ color: EM_PURPLE, fontSize: 16 }}>✓</span>}
+    </button>
+  );
+};
+
+const EmLiveSearch = ({ placeholder, items, renderItem, onPick }) => {
+  const [q, setQ] = React.useState("");
+  const matches = q ? items.filter(renderItem.match(q)) : [];
+  return (
+    <div>
+      <input className="input" placeholder={placeholder} value={q} onChange={e => setQ(e.target.value)} style={{ height: 48, fontSize: 15 }}/>
+      {q && (
+        <div style={{ marginTop: 6, border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden", maxHeight: 240, overflowY: "auto" }}>
+          {matches.length === 0
+            ? <div style={{ padding: 14, font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-4)", textAlign: "center" }}>No matches.</div>
+            : matches.map(it => renderItem.row(it, () => { onPick(it); setQ(""); }))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const EmFormSection = ({ label, children }) => (
+  <div>
+    <div style={{ font: "600 11px/1 var(--font-sans)", color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 10 }}>{label}</div>
+    {children}
+  </div>
+);
+
+const EmFormScreen = ({ form, setForm, onReview, onCancel, prefillNote }) => {
+  const [showErrors, setShowErrors] = React.useState(false);
+  const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+  const minChars = (window.bgStore?.config?.minChars) || 50;
+  const maxHrs = (window.bgStore?.config?.maxHrs) || 24;
+
+  const errs = [];
+  if (!form.severity) errs.push("Severity");
+  if (!form.recipient) errs.push("Recipient");
+  if (!form.resource) errs.push("Resource");
+  if ((form.justification || "").trim().length < minChars) errs.push(`Justification (${minChars} chars minimum)`);
+  const valid = errs.length === 0;
+
+  const recRow = {
+    match: (q) => (r) => `${r.name} ${r.email} ${r.role}`.toLowerCase().includes(q.toLowerCase()),
+    row: (r, pick) => (
+      <button key={r.id} onClick={pick} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "9px 12px", border: "none", borderBottom: "1px solid var(--border-subtle)", background: "transparent", cursor: "pointer", textAlign: "left" }}>
+        <Avatar name={r.name} size={26}/>
+        <div><div style={{ font: "500 12.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{r.name}</div><div className="t-tiny" style={{ color: "var(--fg-4)" }}>{r.role}</div></div>
+      </button>
+    ),
+  };
+  const resRow = {
+    match: (q) => (r) => `${r.name} ${r.env}`.toLowerCase().includes(q.toLowerCase()),
+    row: (r, pick) => {
+      const blocked = r.creds.length === 0;
+      return (
+        <button key={r.id} onClick={() => !blocked && pick()} disabled={blocked} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "9px 12px", border: "none", borderBottom: "1px solid var(--border-subtle)", background: "transparent", cursor: blocked ? "not-allowed" : "pointer", textAlign: "left", opacity: blocked ? 0.6 : 1 }}>
+          <Icon name={r.type === "database" ? "database" : "server"} size={14} color="var(--fg-3)"/>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ font: "500 12.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{blocked ? "⚠ " : ""}{r.name}</div>
+            <div className="t-tiny" style={{ color: blocked ? "var(--danger-fg)" : "var(--fg-4)" }}>{blocked ? "no credentials attached — cannot grant access" : `${r.env} · ${r.criticality}`}</div>
+          </div>
+          {!blocked && <span style={{ padding: "1px 7px", borderRadius: 999, font: "600 10px/1.4 var(--font-sans)", background: r.criticality === "Critical" ? "var(--danger-soft)" : "var(--warning-soft)", color: r.criticality === "Critical" ? "var(--danger-fg)" : "var(--warning-fg)" }}>{r.criticality}</span>}
+        </button>
+      );
+    },
+  };
+
+  const inputBig = { height: 48, fontSize: 16 };
+
+  return (
+    <div style={{ minHeight: "100%", background: EM_BG, display: "flex", flexDirection: "column" }}>
+      <EmHeaderStrip/>
+      <div className="scroll-area" style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center" }}>
+        <div style={{ width: "100%", maxWidth: 640, padding: "18px 18px 32px" }}>
+          <div style={{ font: "500 12px/1 var(--font-sans)", color: "#B8B4C0", marginBottom: 14 }}>Step 1 of 2 — Emergency details</div>
+          <div style={{ background: "#fff", borderRadius: 8, padding: 20, display: "flex", flexDirection: "column", gap: 22 }}>
+
+            {prefillNote && (
+              <div style={{ padding: 10, background: EM_SOFT, color: EM_PURPLE, borderLeft: `3px solid ${EM_PURPLE}`, borderRadius: "0 4px 4px 0", font: "500 12px/1.5 var(--font-sans)" }}>
+                {prefillNote}
+              </div>
+            )}
+
+            <EmFormSection label="Severity">
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <EmSeverityCard level="P1" title="Critical" desc="System down · Revenue impact · Customer-facing" selected={form.severity === "P1"} onSelect={() => set("severity", "P1")}/>
+                <EmSeverityCard level="P2" title="High"     desc="Degraded service · Security incident" selected={form.severity === "P2"} onSelect={() => set("severity", "P2")}/>
+                <EmSeverityCard level="P3" title="Medium"   desc="Internal issue · No direct customer impact" selected={form.severity === "P3"} onSelect={() => set("severity", "P3")}/>
+              </div>
+            </EmFormSection>
+
+            <EmFormSection label={(window.bgStore?.config?.ticketLabel) || "PagerDuty incident #"}>
+              <input className="input" value={form.incident} onChange={e => set("incident", e.target.value)} placeholder="e.g. PD-4821" style={inputBig}/>
+              <div style={{ marginTop: 6, font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>Enter your incident ticket number</div>
+              {window.__emItsmDown && <div style={{ marginTop: 6, padding: 8, background: "var(--warning-soft)", color: "var(--warning-fg)", borderRadius: 4, font: "500 11.5px/1.4 var(--font-sans)" }}>⚠ ITSM unreachable — enter reference manually. Does not block submission.</div>}
+            </EmFormSection>
+
+            <EmFormSection label="Who needs access?">
+              {form.recipient ? (
+                <div style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "6px 10px", background: EM_SOFT, borderRadius: 999 }}>
+                  <Avatar name={form.recipient.name} size={22}/>
+                  <span style={{ font: "500 12.5px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{form.recipient.name}</span>
+                  <button onClick={() => set("recipient", null)} style={{ border: "none", background: "none", cursor: "pointer", color: "var(--fg-3)", fontSize: 14 }}>×</button>
+                </div>
+              ) : (
+                <EmLiveSearch placeholder="Search by name or email…" items={EM_RECIPIENTS} renderItem={recRow} onPick={r => set("recipient", r)}/>
+              )}
+            </EmFormSection>
+
+            <EmFormSection label="Which resource?">
+              {form.resource ? (
+                <>
+                  <div style={{ padding: 12, border: `1px solid ${EM_PURPLE}`, borderRadius: 6, background: EM_SOFT }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <Icon name={form.resource.type === "database" ? "database" : "server"} size={14} color="var(--fg-2)"/>
+                      <span className="t-mono" style={{ font: "600 13px/1.3 var(--font-sans)", color: "var(--fg-1)" }}>{form.resource.name}</span>
+                      <button onClick={() => { set("resource", null); set("credential", null); }} style={{ marginLeft: "auto", border: "none", background: "none", cursor: "pointer", color: "var(--fg-3)", fontSize: 14 }}>×</button>
+                    </div>
+                    <div style={{ font: "400 12px/1.5 var(--font-sans)", color: "var(--fg-3)", marginTop: 6 }}>{form.resource.typeLabel} · {form.resource.ip} · {form.resource.criticality} · {form.resource.sessions} active session{form.resource.sessions === 1 ? "" : "s"}</div>
+                  </div>
+                  <div style={{ marginTop: 12 }}>
+                    <label style={{ font: "500 12px/1.4 var(--font-sans)", color: "var(--fg-2)" }}>Which credential?</label>
+                    <select className="input" value={form.credential || form.resource.creds[0]} onChange={e => set("credential", e.target.value)} style={{ marginTop: 6, height: 44 }}>
+                      {form.resource.creds.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </div>
+                </>
+              ) : (
+                <EmLiveSearch placeholder="Search resources…" items={EM_RESOURCES} renderItem={resRow} onPick={r => { set("resource", r); set("credential", r.creds[0]); }}/>
+              )}
+            </EmFormSection>
+
+            <EmFormSection label="How long?">
+              <div style={{ display: "flex", gap: 8 }}>
+                {[{ v: 1, l: "1 hour" }, { v: 4, l: "4 hours" }, { v: "custom", l: "Custom" }].map(o => {
+                  const sel = form.duration === o.v;
+                  return <button key={o.v} onClick={() => set("duration", o.v)} style={{ flex: 1, height: 48, border: `1.5px solid ${sel ? EM_PURPLE : "var(--border)"}`, background: sel ? EM_SOFT : "#fff", color: sel ? EM_PURPLE : "var(--fg-2)", font: `${sel ? 700 : 500} 13px/1 var(--font-sans)`, borderRadius: 6, cursor: "pointer" }}>{o.l}</button>;
+                })}
+              </div>
+              {form.duration === "custom" && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                  <input className="input" type="number" min={1} max={maxHrs} value={form.customHrs} onChange={e => set("customHrs", Math.min(maxHrs, Math.max(1, +e.target.value || 1)))} style={{ width: 100, height: 44 }}/>
+                  <span style={{ font: "500 12.5px/1 var(--font-sans)", color: "var(--fg-3)" }}>hours · Max: {maxHrs}h per policy</span>
+                </div>
+              )}
+              <div style={{ marginTop: 8, font: "400 11.5px/1.4 var(--font-sans)", color: "var(--fg-4)" }}>Access expires automatically. Post-incident review is required after.</div>
+            </EmFormSection>
+
+            <EmFormSection label="What's happening?">
+              <textarea className="input" rows={4} value={form.justification} onChange={e => set("justification", e.target.value)} placeholder="Describe what happened and why normal access isn't possible right now."/>
+              <div style={{ marginTop: 4, font: "500 11.5px/1 var(--font-sans)", color: (form.justification || "").trim().length >= minChars ? "var(--success-fg)" : (showErrors ? EM_RED : "var(--fg-4)") }}>{(form.justification || "").trim().length} / {minChars} minimum</div>
+            </EmFormSection>
+
+            {showErrors && !valid && (
+              <div style={{ padding: 12, background: "var(--danger-soft)", borderRadius: 6, font: "500 12.5px/1.5 var(--font-sans)", color: EM_RED }}>
+                Complete these fields: {errs.join(", ")}
+              </div>
+            )}
+
+            <button onClick={() => valid ? onReview() : setShowErrors(true)}
+              style={{ ...emBtnPrimary, height: 56, marginTop: 0, ...(valid ? {} : { background: "#C9C5CE" }) }}>
+              Review and grant →
+            </button>
+            <div style={{ textAlign: "center" }}>
+              <a href="#" onClick={e => { e.preventDefault(); onCancel(); }} style={{ font: "500 12.5px/1 var(--font-sans)", color: "var(--fg-3)" }}>Cancel and go to dashboard →</a>
+            </div>
+          </div>
+        </div>
+      </div>
+      <EmConsequenceBar/>
+    </div>
+  );
+};
+
+// =========================================================
+// SCREEN 5 — PRE-GRANT REVIEW
+// =========================================================
+const EmReviewScreen = ({ form, onGrant, onEdit }) => {
+  const [typed, setTyped] = React.useState("");
+  const [checked, setChecked] = React.useState(false);
+  const crit = form.resource.criticality;
+  const hrs = form.duration === "custom" ? form.customHrs : form.duration;
+  const expires = new Date(Date.now() + hrs * 3600000).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+  const [showMore, setShowMore] = React.useState(false);
+
+  // Confirmation friction scales with resource criticality.
+  const canGrant = crit === "Critical" ? typed.trim().toLowerCase() === form.resource.name.toLowerCase()
+                 : crit === "High" ? checked
+                 : true;
+
+  const Row = ({ k, children }) => (
+    <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 10, padding: "5px 0", font: "400 12.5px/1.5 var(--font-sans)" }}>
+      <span style={{ color: "var(--fg-4)" }}>{k}</span><span style={{ color: "var(--fg-1)" }}>{children}</span>
+    </div>
+  );
+
+  return (
+    <div style={{ minHeight: "100%", background: EM_BG, display: "flex", flexDirection: "column" }}>
+      <EmHeaderStrip/>
+      <div className="scroll-area" style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center" }}>
+        <div style={{ width: "100%", maxWidth: 640, padding: "18px 18px 32px" }}>
+          <div style={{ font: "500 12px/1 var(--font-sans)", color: "#B8B4C0", marginBottom: 14 }}>Step 2 of 2 — Review before granting</div>
+          <div style={{ background: "#fff", borderRadius: 8, padding: 20 }}>
+            <div style={{ font: "600 20px/1.2 var(--font-sans)", color: "var(--fg-1)" }}>Review before you grant</div>
+            <div style={{ font: "500 13px/1.5 var(--font-sans)", color: EM_RED, marginTop: 4 }}>This cannot be undone — only revoked.</div>
+
+            <div style={{ marginTop: 16, padding: 14, border: `2px solid ${EM_PURPLE}`, borderRadius: 8 }}>
+              <Row k="Severity"><BGDSeverity level={form.severity} size="lg"/></Row>
+              <Row k="Incident">{form.incident || "—"}</Row>
+              <Row k="Recipient"><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Avatar name={form.recipient.name} size={20}/> {form.recipient.name} · {form.recipient.role}</span></Row>
+              <Row k="Resource"><span className="t-mono">{form.resource.name}</span> · {form.resource.typeLabel} · {form.resource.criticality}</Row>
+              <Row k="Credential"><span className="t-mono">{form.credential || form.resource.creds[0]}</span> <span style={{ color: "var(--fg-4)" }}>(non-viewable)</span></Row>
+              <Row k="Duration">{hrs} hour{hrs === 1 ? "" : "s"} · Expires {expires}</Row>
+              <Row k="Recording"><span style={{ color: "var(--success-fg)" }}>● Mandatory</span></Row>
+              <Row k="Rotation"><span style={{ color: "var(--fg-2)" }}>✓ Queued after session ends</span></Row>
+              <Row k="Justification">
+                <span>{showMore ? form.justification : (form.justification.slice(0, 100) + (form.justification.length > 100 ? "…" : ""))}
+                  {form.justification.length > 100 && <a href="#" onClick={e => { e.preventDefault(); setShowMore(m => !m); }} style={{ marginLeft: 6, color: EM_PURPLE }}>{showMore ? "Show less" : "Show more"}</a>}</span>
+              </Row>
+            </div>
+
+            <div style={{ marginTop: 14, padding: 12, background: "var(--bg-surface-2)", borderRadius: 6, font: "400 12px/1.8 var(--font-sans)", color: "var(--fg-3)" }}>
+              🔒 Session recording — always on<br/>
+              🔒 MFA required when recipient connects<br/>
+              🔒 Credential rotation after session ends<br/>
+              🔒 Post-incident review mandatory
+            </div>
+
+            {/* Confirmation mechanism scales with criticality */}
+            <div style={{ marginTop: 16 }}>
+              {crit === "Critical" && (
+                <div>
+                  <label style={{ font: "500 12.5px/1.4 var(--font-sans)", color: "var(--fg-1)" }}>Type the resource name to confirm:</label>
+                  <input className="input t-mono" autoFocus value={typed} onChange={e => setTyped(e.target.value)} placeholder={form.resource.name} style={{ marginTop: 6, height: 44 }}/>
+                </div>
+              )}
+              {crit === "High" && (
+                <label style={{ display: "flex", alignItems: "flex-start", gap: 9, cursor: "pointer", font: "400 12.5px/1.5 var(--font-sans)", color: "var(--fg-1)" }}>
+                  <input type="checkbox" checked={checked} onChange={() => setChecked(c => !c)} style={{ accentColor: EM_PURPLE, marginTop: 2 }}/>
+                  I confirm I am granting emergency access to <strong className="t-mono">{form.resource.name}</strong>
+                </label>
+              )}
+            </div>
+
+            <button onClick={() => canGrant && onGrant(hrs, expires)} disabled={!canGrant}
+              style={{ ...emBtnPrimary, height: 56, ...(canGrant ? {} : { background: "#C9C5CE", cursor: "not-allowed" }) }}>
+              Grant emergency access
+            </button>
+            <div style={{ textAlign: "center", marginTop: 10 }}>
+              <a href="#" onClick={e => { e.preventDefault(); onEdit(); }} style={{ font: "500 12.5px/1 var(--font-sans)", color: "var(--fg-3)" }}>← Edit</a>
+            </div>
+          </div>
+        </div>
+      </div>
+      <EmConsequenceBar/>
+    </div>
+  );
+};
+
+// =========================================================
+// SCREEN 6 — GRANTING IN PROGRESS
+// =========================================================
+const EM_GRANT_STEPS = [
+  "Identity verified",
+  "Emergency details recorded",
+  "Granting access",
+  "Notifying security team",
+  "Starting mandatory recording",
+  "Logging to audit trail",
+];
+const EmGrantingScreen = ({ form, onDone }) => {
+  const [done, setDone] = React.useState(0);
+  React.useEffect(() => {
+    if (done >= EM_GRANT_STEPS.length) { const t = setTimeout(onDone, 400); return () => clearTimeout(t); }
+    const t = setTimeout(() => setDone(d => d + 1), done === 0 ? 300 : 450);
+    return () => clearTimeout(t);
+  }, [done]);
+  return (
+    <div style={{ minHeight: "100%", background: EM_BG, display: "flex", flexDirection: "column" }}>
+      <EmHeaderStrip/>
+      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ width: "100%", maxWidth: 420 }}>
+          <div style={{ font: "600 18px/1.3 var(--font-sans)", color: "#fff", marginBottom: 20, textAlign: "center" }}>Granting emergency access…</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {EM_GRANT_STEPS.map((s, i) => {
+              const complete = i < done;
+              const active = i === done;
+              const label = s === "Granting access" ? `Granting access to ${form.resource.name} for ${form.recipient.name}…`
+                          : s === "Notifying security team" ? "Notifying security team"
+                          : s;
+              return (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", background: complete || active ? "#1A1815" : "transparent", borderRadius: 6, opacity: complete || active ? 1 : 0.4 }}>
+                  <span style={{ width: 20, textAlign: "center", color: complete ? "var(--success-fg)" : active ? EM_PURPLE : "#5A564F" }}>
+                    {complete ? "✓" : active ? <Spinner size={13}/> : "○"}
+                  </span>
+                  <span style={{ flex: 1, font: "500 13px/1.4 var(--font-sans)", color: complete ? "#DFE3E8" : active ? "#fff" : "#8A857C" }}>{label}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+      <EmConsequenceBar/>
+    </div>
+  );
+};
+
+// =========================================================
+// SCREEN 7 — ACCESS GRANTED
+// =========================================================
+const EmGrantedScreen = ({ session, form, onMonitor, onExit }) => {
+  const [notified, setNotified] = React.useState(true);
+  const expires = new Date(session.expiresAtMs).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+  return (
+    <div style={{ minHeight: "100%", background: EM_BG, display: "flex", flexDirection: "column" }}>
+      <EmHeaderStrip/>
+      <div className="scroll-area" style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center" }}>
+        <div style={{ width: "100%", maxWidth: 480, padding: "24px 18px", textAlign: "center" }}>
+          <div style={{ fontSize: 40, color: EM_PURPLE }}>⚡</div>
+          <div style={{ font: "600 24px/1.2 var(--font-sans)", color: "#fff", marginTop: 8 }}>Emergency access granted</div>
+
+          <div style={{ marginTop: 20, background: "#fff", border: `2px solid ${EM_PURPLE}`, borderRadius: 8, padding: 16, textAlign: "left" }}>
+            <div className="t-mono" style={{ font: "700 14px/1.3 var(--font-mono)", color: EM_PURPLE, marginBottom: 10 }}>{session.id}</div>
+            {[["Recipient", form.recipient.name], ["Resource", form.resource.name], ["Credential", (form.credential || form.resource.creds[0]) + " (non-viewable — injected automatically)"], ["Access expires", expires], ["Recording", "● Active now"], ["Notification sent to", "Aria Chen, Security Team"]].map(([k, v]) => (
+              <div key={k} style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 10, padding: "4px 0", font: "400 12.5px/1.5 var(--font-sans)" }}>
+                <span style={{ color: "var(--fg-4)" }}>{k}</span><span style={{ color: k === "Recording" ? "var(--success-fg)" : "var(--fg-1)" }}>{v}</span>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ marginTop: 12, padding: 10, background: "#1A1815", borderRadius: 6, font: "500 11px/1.5 var(--font-mono)", color: "#9CA3AF", textAlign: "left" }}>
+            Logged: {session.id} granted at {new Date(session.grantedAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })} by Arjun Bansal · {form.incident || "—"} · Northwind Financial
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 18 }}>
+            <button onClick={onMonitor} style={{ ...emBtnPrimary, height: 56, marginTop: 0 }}>Monitor live session</button>
+            <button onClick={() => { setNotified(true); window.pamToast && window.pamToast(`Grant details sent to ${form.recipient.name}`, "info"); }}
+              style={{ height: 48, border: `1px solid ${EM_PURPLE}`, background: "#fff", color: EM_PURPLE, font: "600 14px/1 var(--font-sans)", borderRadius: 8, cursor: "pointer" }}>
+              {notified ? `Resend grant details to ${form.recipient.name.split(" ")[0]}` : `Send grant details to ${form.recipient.name.split(" ")[0]}`}
+            </button>
+            <button onClick={onExit} style={{ height: 44, border: "none", background: "transparent", color: "#9C97A8", font: "500 13px/1 var(--font-sans)", cursor: "pointer" }}>Go to PAM dashboard</button>
+          </div>
+        </div>
+      </div>
+      <EmStatusBar session={session}/>
+    </div>
+  );
+};
+
+// =========================================================
+// PATH B — EMERGENCY REDIRECT MODAL (within standard PAM shell)
+// =========================================================
+const EmRedirectModal = ({ onGo, onDismiss }) => (
+  <div style={{ position: "fixed", inset: 0, zIndex: 480, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+    <div style={{ width: 420, maxWidth: "94vw", background: EM_PURPLE, borderRadius: 12, padding: 24, boxShadow: "0 24px 60px rgba(0,0,0,0.4)", textAlign: "center" }}>
+      <div style={{ fontSize: 34, color: "#fff" }}>⚡</div>
+      <div style={{ font: "600 22px/1.2 var(--font-sans)", color: "#fff", marginTop: 8 }}>You have an emergency waiting</div>
+      <div style={{ font: "400 14px/1.5 var(--font-sans)", color: "rgba(255,255,255,0.85)", marginTop: 8 }}>A break-glass notification requires your attention.</div>
+      <div style={{ font: "400 13px/1.6 var(--font-sans)", color: "rgba(255,255,255,0.95)", marginTop: 14, padding: 12, background: "rgba(0,0,0,0.18)", borderRadius: 8 }}>
+        Incident: PD-4821 · Reported by: Rohan Mehta
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 20 }}>
+        <button onClick={onGo} style={{ height: 48, border: "none", borderRadius: 8, background: "#fff", color: EM_PURPLE, font: "700 14px/1 var(--font-sans)", cursor: "pointer" }}>Go to emergency access →</button>
+        <button onClick={onDismiss} style={{ height: 44, border: "1px solid rgba(255,255,255,0.5)", borderRadius: 8, background: "transparent", color: "#fff", font: "500 13px/1 var(--font-sans)", cursor: "pointer" }}>Dismiss and go to dashboard</button>
+      </div>
+    </div>
+  </div>
+);
+
 // =========================================================
 // FLOW CONTROLLER
 // =========================================================
-const EmergencyEntryFlow = ({ onExit }) => {
-  const [screen, setScreen] = React.useState("login");   // login | mfa | transition | form(P2)
+const EmergencyEntryFlow = ({ onExit, startScreen = "login" }) => {
+  const [screen, setScreen] = React.useState(startScreen);   // login|mfa|transition|form|review|granting|granted|monitor(P3)
+  const [form, setForm] = React.useState({ severity: "", incident: "", recipient: null, resource: null, credential: null, duration: 4, customHrs: 2, justification: "" });
+  const [session, setSession] = React.useState(null);
+
+  const doGrant = (hrs, expiresLabel) => {
+    const grantedAt = Date.now();
+    const s = {
+      id: "BG-0147", severity: form.severity, recipient: form.recipient.name,
+      resource: form.resource.name, credential: form.credential || form.resource.creds[0],
+      initiator: "Arjun Bansal", durationHrs: hrs, expiresAtMs: grantedAt + hrs * 3600000,
+      grantedAt, justification: form.justification, ticket: form.incident, commands: 0,
+    };
+    setSession(s);
+    // Register as the real active break-glass session so the dashboard,
+    // floating indicator, and header button all reflect it.
+    if (window.bgStore) window.bgStore.grant(s);
+    setScreen("granting");
+  };
+
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 500, background: EM_BG, overflow: "auto" }}>
       {screen === "login" && <EmLoginScreen onAuthed={() => setScreen("mfa")} onReturn={onExit}/>}
       {screen === "mfa" && <EmMfaScreen onVerified={() => setScreen("transition")}/>}
       {screen === "transition" && <EmTransitionScreen onDone={() => setScreen("form")}/>}
-      {screen === "form" && (
-        <div style={{ minHeight: "100%", background: EM_BG, display: "flex", flexDirection: "column" }}>
-          <EmHeaderStrip/>
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center" }}>
-            <div style={{ fontSize: 40, color: EM_PURPLE, marginBottom: 12 }}>⚡</div>
-            <div style={{ font: "600 18px/1.3 var(--font-sans)", color: "#fff" }}>Authentication complete</div>
-            <div style={{ font: "400 13.5px/1.6 var(--font-sans)", color: "#B8B4C0", marginTop: 8, maxWidth: 360 }}>
-              The emergency access form (Screen 4), pre-grant review, grant progress, and mobile monitor arrive in Phase 2 of this build. You reached this point via the full auth + MFA + transition path.
-            </div>
-            <button onClick={onExit} style={{ ...emBtnPrimary, maxWidth: 240, marginTop: 20 }}>Exit emergency mode</button>
-          </div>
-          <EmConsequenceBar/>
-        </div>
-      )}
+      {screen === "form" && <EmFormScreen form={form} setForm={setForm} onReview={() => setScreen("review")} onCancel={onExit} prefillNote={startScreen === "form" ? "Pre-filled from your emergency notification — confirm the details below." : null}/>}
+      {screen === "review" && <EmReviewScreen form={form} onGrant={doGrant} onEdit={() => setScreen("form")}/>}
+      {screen === "granting" && <EmGrantingScreen form={form} onDone={() => setScreen("granted")}/>}
+      {screen === "granted" && <EmGrantedScreen session={session} form={form} onMonitor={() => window.pamToast && window.pamToast("Mobile monitor arrives in Phase 3", "info")} onExit={onExit}/>}
     </div>
   );
 };
@@ -379,4 +805,6 @@ const emBtnDisabled = { background: "#C9C5CE", color: "#fff", cursor: "not-allow
 Object.assign(window, {
   EmergencyEntryFlow, EmLoginScreen, EmMfaScreen, EmTransitionScreen,
   EmHeaderStrip, EmConsequenceBar, EmConsequenceLine, EmDigitBoxes,
+  EmFormScreen, EmReviewScreen, EmGrantingScreen, EmGrantedScreen,
+  EmRedirectModal, EmStatusBar,
 });
