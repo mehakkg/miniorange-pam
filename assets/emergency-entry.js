@@ -760,12 +760,198 @@ const EmRedirectModal = ({ onGo, onDismiss }) => (
 );
 
 // =========================================================
+// SCREEN 8 — MOBILE MONITOR (native single-column, not a shrunk desktop panel)
+// =========================================================
+const EM_FEED_SEED = [
+  { ts: "02:47:31", cmd: "rm -rf /var/log", risk: "high" },
+  { ts: "02:47:28", cmd: "cd /var/log", risk: "low" },
+  { ts: "02:47:22", cmd: "sudo su", risk: "med" },
+  { ts: "02:47:15", cmd: "Session connected as root", risk: "low" },
+];
+const EmMonitorScreen = ({ session, form, onTerminate, onExtend }) => {
+  const [, tick] = React.useReducer(x => x + 1, 0);
+  React.useEffect(() => { const t = setInterval(tick, 1000); return () => clearInterval(t); }, []);
+  // Local expiry so demo controls can exercise the amber/red countdown states.
+  const [expiresAtMs, setExpiresAtMs] = React.useState(session.expiresAtMs);
+  const [paused, setPaused] = React.useState(false);
+  const [detailsOpen, setDetailsOpen] = React.useState(false);
+  const msLeft = expiresAtMs - Date.now();
+  const critical = msLeft <= 10 * 60000, warning = !critical && msLeft <= 30 * 60000;
+  const cdColor = critical ? "#F87171" : warning ? "#FBBF24" : "#fff";
+  const riskColor = c => c === "high" ? "#F87171" : c === "med" ? "#FBBF24" : "#9CA3AF";
+
+  return (
+    <div style={{ minHeight: "100%", background: EM_BG, display: "flex", flexDirection: "column" }}>
+      <EmHeaderStrip/>
+      <div className="scroll-area" style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center" }}>
+        <div style={{ width: "100%", maxWidth: 480, padding: "18px 16px 28px" }}>
+          {/* TOP — grant status, terminate always first/visible */}
+          <div style={{ font: "600 14px/1.3 var(--font-sans)", color: "#fff" }}>⚡ <span className="t-mono">{session.id}</span> — Active</div>
+          <div style={{ font: "400 13px/1.4 var(--font-sans)", color: "#B8B4C0", marginTop: 4 }}>{form.recipient.name} → <span className="t-mono">{form.resource.name}</span></div>
+
+          <div style={{ marginTop: 14, padding: "16px", background: "#1A1815", borderRadius: 10, textAlign: "center" }}>
+            <div style={{ font: "500 11px/1 var(--font-sans)", color: "#8A857C", textTransform: "uppercase", letterSpacing: 0.6 }}>Time remaining</div>
+            <div className="t-mono" style={{ font: "700 34px/1.1 var(--font-mono)", color: cdColor, marginTop: 6, animation: critical ? "bgPulse 1.6s infinite" : "none" }}>{bgdFmtCountdown(msLeft)}</div>
+          </div>
+
+          <button onClick={onTerminate} style={{ ...emBtnPrimary, height: 56, marginTop: 12, background: EM_RED }}>Terminate</button>
+          <button onClick={onExtend} style={{ width: "100%", height: 48, marginTop: 8, border: `1px solid ${EM_PURPLE}`, background: "transparent", color: "#C9A6E0", font: "600 14px/1 var(--font-sans)", borderRadius: 8, cursor: "pointer" }}>Extend</button>
+
+          {/* Risk score */}
+          <div style={{ marginTop: 18, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span style={{ font: "600 11px/1 var(--font-sans)", color: "#8A857C", textTransform: "uppercase", letterSpacing: 0.6 }}>Live commands</span>
+            <span style={{ padding: "3px 10px", borderRadius: 999, font: "700 12px/1.3 var(--font-sans)", background: "rgba(248,113,113,0.18)", color: "#F87171" }}>Risk: 91 — Critical</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+            <span style={{ font: "400 11.5px/1 var(--font-sans)", color: paused ? "#8A857C" : "var(--success-fg)", display: "inline-flex", alignItems: "center", gap: 5 }}>
+              <span className={paused ? "" : "pulse-dot"} style={{ width: 6, height: 6, borderRadius: "50%", background: paused ? "#8A857C" : "var(--success-fg)", display: "inline-block" }}/>
+              {paused ? "Paused" : "Refreshing every 5 seconds"}
+            </span>
+            <button onClick={() => setPaused(p => !p)} style={{ border: "none", background: "none", color: "#C9A6E0", font: "500 11.5px/1 var(--font-sans)", cursor: "pointer" }}>{paused ? "Resume" : "Pause"}</button>
+          </div>
+
+          {/* Feed */}
+          <div style={{ marginTop: 8, background: "#0A0908", borderRadius: 8, border: "1px solid #2A2724", overflow: "hidden" }}>
+            {EM_FEED_SEED.map((f, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, padding: "9px 12px", borderTop: i ? "1px solid #1C1A17" : "none", font: "500 12px/1.4 var(--font-mono)" }}>
+                <span style={{ color: "#6B7280", flex: "none" }}>{f.ts}</span>
+                <span style={{ color: f.risk === "high" ? "#F87171" : "#DFE3E8", flex: 1 }}>{f.cmd}</span>
+                {f.risk === "high" && <span style={{ color: "#F87171", flex: "none" }}>⚑</span>}
+                {f.risk === "med" && <span style={{ color: "#FBBF24", flex: "none", font: "500 10px/1.4 var(--font-sans)" }}>elevated</span>}
+              </div>
+            ))}
+          </div>
+
+          {/* Collapsible session details */}
+          <button onClick={() => setDetailsOpen(o => !o)} style={{ marginTop: 14, width: "100%", textAlign: "left", border: "none", background: "none", color: "#C9A6E0", font: "500 13px/1 var(--font-sans)", cursor: "pointer" }}>
+            Session details {detailsOpen ? "↑" : "↓"}
+          </button>
+          {detailsOpen && (
+            <div style={{ marginTop: 8, padding: 12, background: "#1A1815", borderRadius: 8, font: "400 12px/1.7 var(--font-mono)", color: "#B8B4C0" }}>
+              Resource: {form.resource.name} · {form.resource.ip}<br/>
+              Credential: {session.credential} (non-viewable)<br/>
+              Policy: 4h window · recording on · rotation queued<br/>
+              MFA: verified at connect
+            </div>
+          )}
+
+          {/* Demo-only countdown state controls */}
+          <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px dashed #2A2724", display: "flex", gap: 6, justifyContent: "center", flexWrap: "wrap" }}>
+            <span className="t-tiny" style={{ color: "#5A564F" }}>[Demo] Countdown:</span>
+            <button onClick={() => setExpiresAtMs(session.expiresAtMs)} style={emDemoBtn}>Normal</button>
+            <button onClick={() => setExpiresAtMs(Date.now() + 25 * 60000)} style={emDemoBtn}>&lt;30m (amber)</button>
+            <button onClick={() => setExpiresAtMs(Date.now() + 8 * 60000)} style={emDemoBtn}>&lt;10m (red)</button>
+          </div>
+        </div>
+      </div>
+      <EmStatusBar session={{ ...session, expiresAtMs }} onTerminate={onTerminate}/>
+    </div>
+  );
+};
+const emDemoBtn = { font: "500 11px/1 var(--font-sans)", padding: "3px 8px", borderRadius: 4, border: "1px solid #3A3733", background: "#1A1815", color: "#B8B4C0", cursor: "pointer" };
+
+// =========================================================
+// TERMINATE OVERLAY (mobile — full-screen, large tap targets)
+// =========================================================
+const EmTerminateOverlay = ({ form, onConfirm, onCancel }) => {
+  const [reason, setReason] = React.useState("");
+  const [other, setOther] = React.useState("");
+  const reasons = ["Incident resolved", "Security concern", "Scope exceeded", "Admin error", "Other"];
+  const valid = reason && (reason !== "Other" || other.trim());
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 520, background: EM_BG, display: "flex", flexDirection: "column" }}>
+      <EmHeaderStrip/>
+      <div className="scroll-area" style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center" }}>
+        <div style={{ width: "100%", maxWidth: 440, padding: "24px 18px" }}>
+          <div style={{ font: "600 20px/1.3 var(--font-sans)", color: "#fff" }}>Terminate emergency access?</div>
+          <div style={{ font: "400 14px/1.6 var(--font-sans)", color: "#B8B4C0", marginTop: 10 }}>{form.recipient.name} will be disconnected from <span className="t-mono" style={{ color: "#DFE3E8" }}>{form.resource.name}</span> immediately.</div>
+          <div style={{ marginTop: 10, padding: 12, background: "rgba(192,57,43,0.16)", borderLeft: `3px solid ${EM_RED}`, borderRadius: "0 6px 6px 0", font: "500 13px/1.5 var(--font-sans)", color: "#F0A9A0" }}>
+            Credential rotation will begin automatically.
+          </div>
+
+          <div style={{ marginTop: 18 }}>
+            <label style={{ font: "500 12.5px/1.4 var(--font-sans)", color: "#B8B4C0" }}>Reason</label>
+            <select value={reason} onChange={e => setReason(e.target.value)} className="input" style={{ marginTop: 6, height: 48, fontSize: 15, background: "#141210", color: "#fff", borderColor: "#3A3733" }}>
+              <option value="">Select a reason…</option>
+              {reasons.map(r => <option key={r} value={r}>{r}</option>)}
+            </select>
+            {reason === "Other" && (
+              <input className="input" value={other} onChange={e => setOther(e.target.value)} placeholder="Describe…" style={{ marginTop: 8, height: 44, background: "#141210", color: "#fff", borderColor: "#3A3733" }}/>
+            )}
+          </div>
+
+          <button onClick={onCancel} style={{ width: "100%", height: 48, marginTop: 20, border: "1px solid #3A3733", background: "transparent", color: "#DFE3E8", font: "600 14px/1 var(--font-sans)", borderRadius: 8, cursor: "pointer" }}>Cancel</button>
+          <button onClick={() => valid && onConfirm(reason === "Other" ? other : reason)} disabled={!valid}
+            style={{ width: "100%", height: 56, marginTop: 10, border: "none", background: valid ? EM_RED : "#5A2420", color: "#fff", font: "700 15px/1 var(--font-sans)", borderRadius: 8, cursor: valid ? "pointer" : "not-allowed" }}>
+            Terminate and revoke
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// =========================================================
+// SCREEN 9 — TERMINATE CONFIRMED
+// =========================================================
+const EmTerminatedScreen = ({ session, form, review, onStartReview, onExit }) => {
+  // Rotation state: in-progress → completed after a beat. Demo toggle exposes
+  // the failure + retry variant.
+  const [rotation, setRotation] = React.useState("in-progress");
+  React.useEffect(() => {
+    if (rotation !== "in-progress") return;
+    const t = setTimeout(() => setRotation("completed"), 3500);
+    return () => clearTimeout(t);
+  }, [rotation]);
+  const days = (window.bgStore?.config?.escalateDays) || 3;
+  const dueDate = new Date(Date.now() + days * 86400000).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const rot = {
+    "in-progress": { c: "var(--warning-fg)", t: "● In progress · est. 45 seconds" },
+    "completed":   { c: "var(--success-fg)", t: "✓ Completed" },
+    "failed":      { c: "#F87171", t: "✗ Failed" },
+  }[rotation];
+  return (
+    <div style={{ minHeight: "100%", background: EM_BG, display: "flex", flexDirection: "column" }}>
+      <EmHeaderStrip/>
+      <div className="scroll-area" style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center" }}>
+        <div style={{ width: "100%", maxWidth: 440, padding: "28px 18px", textAlign: "center" }}>
+          <div style={{ width: 56, height: 56, borderRadius: "50%", background: "var(--success-soft)", color: "var(--success-fg)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 26 }}>✓</div>
+          <div style={{ font: "600 22px/1.2 var(--font-sans)", color: "#fff", marginTop: 12 }}>Emergency access ended</div>
+          <div style={{ font: "400 13.5px/1.6 var(--font-sans)", color: "#B8B4C0", marginTop: 8 }}>{form.recipient.name} has been disconnected from <span className="t-mono">{form.resource.name}</span>.</div>
+
+          <div style={{ marginTop: 16, padding: 14, background: "#1A1815", borderRadius: 8, textAlign: "left" }}>
+            <div style={{ font: "500 13px/1.5 var(--font-sans)", color: "#DFE3E8" }}><span className="t-mono">{session.credential}</span> rotation: <span style={{ color: rot.c }}>{rot.t}</span></div>
+            {rotation === "failed" && (
+              <button onClick={() => setRotation("in-progress")} style={{ marginTop: 8, ...emDemoBtn, color: "#F0A9A0", borderColor: "#5A2420" }}>Retry rotation</button>
+            )}
+            {rotation !== "failed" && (
+              <button onClick={() => setRotation("failed")} style={{ marginTop: 8, ...emDemoBtn }}>[Demo] Show rotation failed</button>
+            )}
+          </div>
+
+          <div style={{ marginTop: 14, padding: 14, background: "color-mix(in oklch, " + EM_PURPLE + " 16%, #141210)", borderRadius: 8, textAlign: "left" }}>
+            <div style={{ font: "600 13.5px/1.4 var(--font-sans)", color: "#fff" }}>Post-incident review required</div>
+            <div style={{ font: "400 12.5px/1.6 var(--font-sans)", color: "#C9C5CE", marginTop: 4 }}>Review must be completed within {days} days (by {dueDate}). You'll receive a reminder notification.</div>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 18 }}>
+            <button onClick={onStartReview} style={{ ...emBtnPrimary, height: 56, marginTop: 0 }}>Start review now →</button>
+            <button onClick={onExit} style={{ height: 44, border: "none", background: "transparent", color: "#9C97A8", font: "500 13px/1 var(--font-sans)", cursor: "pointer" }}>Review later — go to dashboard</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// =========================================================
 // FLOW CONTROLLER
 // =========================================================
 const EmergencyEntryFlow = ({ onExit, startScreen = "login" }) => {
-  const [screen, setScreen] = React.useState(startScreen);   // login|mfa|transition|form|review|granting|granted|monitor(P3)
+  const [screen, setScreen] = React.useState(startScreen);   // login|mfa|transition|form|review|granting|granted|monitor|terminate|terminated|review-panel
   const [form, setForm] = React.useState({ severity: "", incident: "", recipient: null, resource: null, credential: null, duration: 4, customHrs: 2, justification: "" });
   const [session, setSession] = React.useState(null);
+  const [endedReview, setEndedReview] = React.useState(null);
 
   const doGrant = (hrs, expiresLabel) => {
     const grantedAt = Date.now();
@@ -782,6 +968,27 @@ const EmergencyEntryFlow = ({ onExit, startScreen = "login" }) => {
     setScreen("granting");
   };
 
+  // Terminate → clear the active session and drop a pending review into the
+  // dashboard (rotation in-progress). Doesn't set bgStore.open, so no global
+  // panel pops behind the emergency overlay.
+  const doTerminate = (reason) => {
+    const rev = {
+      id: session.id, severity: session.severity, recipient: session.recipient, initiator: "Arjun Bansal",
+      resource: session.resource, endedMs: Date.now(), started: new Date(session.grantedAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+      ended: "just now", duration: "—", justification: session.justification, ticket: session.ticket || "—",
+      status: "pending", credential: session.credential, rotated: false, rotationStatus: "in-progress",
+      commands: session.commands || 0, assignedTo: "Arjun Bansal", ctxSubmitted: false, terminatedReason: reason,
+    };
+    if (window.bgStore) {
+      window.bgStore.stopPoll && window.bgStore.stopPoll();
+      window.bgStore.reviews = [rev, ...window.bgStore.reviews];
+      window.bgStore.active = null;
+      window.bgStore.emit();
+    }
+    setEndedReview(rev);
+    setScreen("terminated");
+  };
+
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 500, background: EM_BG, overflow: "auto" }}>
       {screen === "login" && <EmLoginScreen onAuthed={() => setScreen("mfa")} onReturn={onExit}/>}
@@ -790,7 +997,11 @@ const EmergencyEntryFlow = ({ onExit, startScreen = "login" }) => {
       {screen === "form" && <EmFormScreen form={form} setForm={setForm} onReview={() => setScreen("review")} onCancel={onExit} prefillNote={startScreen === "form" ? "Pre-filled from your emergency notification — confirm the details below." : null}/>}
       {screen === "review" && <EmReviewScreen form={form} onGrant={doGrant} onEdit={() => setScreen("form")}/>}
       {screen === "granting" && <EmGrantingScreen form={form} onDone={() => setScreen("granted")}/>}
-      {screen === "granted" && <EmGrantedScreen session={session} form={form} onMonitor={() => window.pamToast && window.pamToast("Mobile monitor arrives in Phase 3", "info")} onExit={onExit}/>}
+      {screen === "granted" && <EmGrantedScreen session={session} form={form} onMonitor={() => setScreen("monitor")} onExit={onExit}/>}
+      {screen === "monitor" && <EmMonitorScreen session={session} form={form} onTerminate={() => setScreen("terminate")} onExtend={() => window.pamToast && window.pamToast("Extension modal — use the dashboard Extend action for the full flow", "info")}/>}
+      {screen === "terminate" && <EmTerminateOverlay form={form} onConfirm={doTerminate} onCancel={() => setScreen("monitor")}/>}
+      {screen === "terminated" && <EmTerminatedScreen session={session} form={form} review={endedReview} onStartReview={() => setScreen("review-panel")} onExit={onExit}/>}
+      {screen === "review-panel" && window.BGDReviewPanel && React.createElement(window.BGDReviewPanel, { review: endedReview, onClose: onExit })}
     </div>
   );
 };
@@ -806,5 +1017,5 @@ Object.assign(window, {
   EmergencyEntryFlow, EmLoginScreen, EmMfaScreen, EmTransitionScreen,
   EmHeaderStrip, EmConsequenceBar, EmConsequenceLine, EmDigitBoxes,
   EmFormScreen, EmReviewScreen, EmGrantingScreen, EmGrantedScreen,
-  EmRedirectModal, EmStatusBar,
+  EmRedirectModal, EmStatusBar, EmMonitorScreen, EmTerminateOverlay, EmTerminatedScreen,
 });
